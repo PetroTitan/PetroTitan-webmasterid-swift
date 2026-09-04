@@ -43,7 +43,14 @@ jobs:
       IOS_DESTINATION: "generic/platform=iOS Simulator"
 
     steps:
-      - uses: actions/checkout@v4
+      # ⚠ PINNED TO A COMMIT, NOT A TAG.
+      #
+      # A tag is mutable: whoever controls the action can move `v7` to
+      # different code, and this workflow builds the artefact people install.
+      # The SHA below is what `v7.0.1` pointed at when it was verified, and it
+      # cannot be repointed. Both actions also moved to node24, which is what
+      # resolves the "Node.js 20 is deprecated" annotation on the previous run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Select the pinned Xcode, or fail loudly
         run: |
@@ -85,23 +92,45 @@ jobs:
         run: |
           set -euo pipefail
           set -o pipefail
-          swift build 2>&1 | tee /tmp/swift-build.log
-          if grep -E "^/.*Sources/.*warning:" /tmp/swift-build.log; then
-            echo "::error::the package emitted warnings under Swift 6 strict concurrency"
-            exit 1
-          fi
+          # ═══════════════════════════════════════════════════════════════
+          # THE COMPILER DECIDES, NOT A REGEX
+          # ═══════════════════════════════════════════════════════════════
+          #
+          # This step used to build normally and then grep the log for
+          # `warning:`. That worked — it is what caught the `try?` warning —
+          # but it is one log-format change away from silently passing
+          # everything, and a grep cannot see a warning the build emitted to a
+          # path the pattern does not match.
+          #
+          # `-warnings-as-errors` makes the failure the compiler's own. The log
+          # is still captured, for reading, not for deciding.
+          swift build -Xswiftc -warnings-as-errors 2>&1 | tee /tmp/swift-build.log
           swift run WebmasterIDConformance
+
+      - name: Mutation gates — prove the warning gate can fail
+        run: |
+          set -euo pipefail
+          # A gate nobody has seen go red is a hope. This reintroduces the
+          # exact defect that blocked the previous run and requires the build
+          # to reject it — and separately shows that WITHOUT the flag the same
+          # defect builds cleanly, which is what makes the flag the gate.
+          ./Scripts/mutation-gates.sh
 
       # ── 5. the binding iOS gate ──────────────────────────────────────────
       - name: Build for a generic iOS Simulator destination
         run: |
           set -euo pipefail
           set -o pipefail
+          # `SWIFT_TREAT_WARNINGS_AS_ERRORS` is the Xcode-side equivalent of
+          # `-warnings-as-errors`: the iOS build must be held to the same bar
+          # as the macOS one, or a warning that only appears when compiling for
+          # iOS would pass unnoticed.
           xcodebuild build \
             -scheme WebmasterID \
             -destination "${IOS_DESTINATION}" \
             -derivedDataPath /tmp/dd \
             CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             | tee /tmp/ios-build.log
 
       - name: Confirm the iOS 15 deployment target from the BUILD
@@ -114,6 +143,10 @@ jobs:
             grep -oE "\-target [a-z0-9.-]+" /tmp/ios-build.log | sort -u | head
             exit 1
           fi
+          # The build itself already fails on a warning
+          # (SWIFT_TREAT_WARNINGS_AS_ERRORS). This is a second, cheap look at
+          # the log — kept because it names the file, which an error does not
+          # always do clearly in xcodebuild output.
           if grep -E "Sources/.*warning:" /tmp/ios-build.log; then
             echo "::error::the iOS build emitted warnings"
             exit 1
@@ -132,6 +165,7 @@ jobs:
             -destination "${IOS_DESTINATION}" \
             -derivedDataPath /tmp/dd-consumer \
             CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             | tee /tmp/consumer-build.log
 
       # ── 7. the privacy manifest ──────────────────────────────────────────
@@ -258,7 +292,7 @@ jobs:
 
       - name: Upload build logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: build-logs
           path: |
