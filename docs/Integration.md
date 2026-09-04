@@ -21,15 +21,15 @@ https://github.com/PetroTitan/PetroTitan-webmasterid-swift.git
 
 Choose the `WebmasterID` library product.
 
-> ⚠ **`1.0.0` is not tagged yet.** Until it exists, `from: "1.0.0"` does not
-> resolve — depend on a branch or a revision in the meantime. See
-> [`CHANGELOG.md`](../CHANGELOG.md).
+> The recommended version is **`1.0.1`**. `1.0.0` is also published and its
+> SDK code is identical, but its release verification was not deterministic —
+> see [`CHANGELOG.md`](../CHANGELOG.md).
 
-In `Package.swift`, once the tag exists:
+In `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/PetroTitan/PetroTitan-webmasterid-swift.git", from: "1.0.0")
+    .package(url: "https://github.com/PetroTitan/PetroTitan-webmasterid-swift.git", from: "1.0.1")
 ],
 targets: [
     .target(
