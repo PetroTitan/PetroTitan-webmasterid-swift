@@ -1,11 +1,23 @@
 # Changelog
 
-## 1.0.0 — unreleased
+## Unreleased
 
-The first public release of the WebmasterID Swift SDK.
+### Fixed
 
-> **Not yet tagged.** This entry describes what `1.0.0` will contain. Until the
-> tag exists, `from: "1.0.0"` does not resolve.
+- The cancellation check in the verification suite raced a 20 ms sleep against
+  a 120 ms request. On a loaded runner the flush finished first, the queue
+  emptied legitimately, and the check reported a loss that had not occurred —
+  which is how 1.0.0's tag-triggered CI went red on a commit whose `main` run
+  was green. The transport now signals when a request is in flight and the
+  test cancels at that point, so nothing depends on machine load.
+
+## 1.0.0
+
+The first public release of the WebmasterID Swift SDK, tagged at `c5da2a8`.
+
+> ⚠ **Its tag-triggered CI run is red** because of the flake described above,
+> not because of anything in the package: the same tree passed on `main`. A
+> published tag is immutable and was not moved. The fix is forward-only.
 
 ### Added
 
