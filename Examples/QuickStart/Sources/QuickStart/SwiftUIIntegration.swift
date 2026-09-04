@@ -19,8 +19,13 @@ public struct AnalyticsSceneModifier: ViewModifier {
         content.onChange(of: scenePhase) { phase in
             Task {
                 switch phase {
-                case .active: await lifecycle.openedApp()
-                case .background: await lifecycle.enteredBackground()
+                case .active:
+                    /* A lifecycle hook is the app boundary: it cannot throw,
+                     * so it decides. See `AnalyticsFailure`. */
+                    do { try await lifecycle.openedApp() }
+                    catch { AnalyticsFailure.report(error, from: "scenePhase.active") }
+                case .background:
+                    await lifecycle.enteredBackground()
                 default: break
                 }
             }

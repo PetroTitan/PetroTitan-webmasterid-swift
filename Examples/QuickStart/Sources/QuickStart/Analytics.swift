@@ -31,6 +31,26 @@ public enum Analytics {
     }
 }
 
+/// Where an integration mistake surfaces.
+///
+/// `track` throws only when the CALLER got something wrong — a screen on an
+/// `app_open`, a sentence where a symbol belongs. A lifecycle hook cannot
+/// propagate, so it has to decide, and the two wrong decisions are obvious:
+/// crashing a shipped app over analytics, or discarding the one signal that
+/// would have told the developer their integration is silently doing nothing.
+///
+/// So it is loud in development and quiet in production. Replace it if your
+/// app has a better place to send this.
+public enum AnalyticsFailure {
+    public static func report(_ error: Error, from context: StaticString) {
+        #if DEBUG
+        assertionFailure("WebmasterID \(context): \(error)")
+        #else
+        _ = (error, context)
+        #endif
+    }
+}
+
 /// The lifecycle an app forwards. Kept UI-framework-free on purpose: the SDK
 /// performs no swizzling and observes nothing on its own, so an app decides
 /// when these happen.
@@ -67,17 +87,38 @@ public struct AnalyticsLifecycle: Sendable {
         await client.resetIdentity()
     }
 
-    public func openedApp() async {
+    /*
+     * ═══════════════════════════════════════════════════════════════════════
+     * WHY THESE `throws` INSTEAD OF SWALLOWING THE ERROR
+     * ═══════════════════════════════════════════════════════════════════════
+     *
+     * These three were written as `try? await client.track(…)`, which reads
+     * like defensiveness and is not. `track` throws only for a validation
+     * mistake the CALLER made — a screen on an `app_open`, a `cta_id` on
+     * something that is not a tap, a screen name that is a sentence rather
+     * than a symbol. Every one of those is a bug in the integration, and
+     * every one of them is silent under `try?`: the developer sees no error,
+     * the dashboard stays empty, and nothing connects the two.
+     *
+     * It never throws because the network is down, the queue is full or the
+     * server is unhappy. Those are handled internally and reported through
+     * `diagnostics()`. So there is nothing here that an app should shrug off.
+     *
+     * `try?` also produced an unused `Bool?` — `track` is
+     * `@discardableResult` — which is the warning that blocked CI before it
+     * ever reached the iOS build.
+     */
+    public func openedApp() async throws {
         await client.applicationDidBecomeActive()
-        try? await client.track(.appOpen)
+        try await client.track(.appOpen)
     }
 
-    public func viewed(screen: String) async {
-        try? await client.track(.screenView, context: .init(screen: screen))
+    public func viewed(screen: String) async throws {
+        try await client.track(.screenView, context: .init(screen: screen))
     }
 
-    public func tapped(cta: String, on screen: String) async {
-        try? await client.track(.ctaTap, context: .init(screen: screen, ctaID: cta))
+    public func tapped(cta: String, on screen: String) async throws {
+        try await client.track(.ctaTap, context: .init(screen: screen, ctaID: cta))
     }
 
     /// Deliver what is queued now. Anything undelivered stays on disk and is

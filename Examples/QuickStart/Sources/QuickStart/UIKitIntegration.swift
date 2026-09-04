@@ -17,7 +17,10 @@ public final class AnalyticsAppDelegateBridge: NSObject {
     }
 
     public func applicationDidBecomeActive(_ application: UIApplication) {
-        Task { await lifecycle.openedApp() }
+        Task {
+            do { try await lifecycle.openedApp() }
+            catch { AnalyticsFailure.report(error, from: "applicationDidBecomeActive") }
+        }
     }
 
     public func applicationDidEnterBackground(_ application: UIApplication) {
