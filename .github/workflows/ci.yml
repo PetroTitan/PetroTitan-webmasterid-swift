@@ -1,0 +1,268 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# THE GATE THIS PACKAGE IS RELEASED BEHIND
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# ⚠ `swift build` IS NOT THE iOS GATE, AND MUST NEVER BE SUBSTITUTED FOR IT.
+# It compiles for macOS. A macOS-only API, or an availability annotation that
+# holds on macOS 12 and not on iOS 15, passes it and fails a consumer's build.
+# Only `xcodebuild` against an iOS Simulator SDK proves what this package
+# claims, which is why the iOS job exists and why a separate gate asserts it
+# cannot be replaced.
+#
+# Nothing here contacts a WebmasterID endpoint or needs an app property.
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
+  pull_request:
+    paths:
+      - "Package.swift"
+      - "Sources/**"
+      - "Examples/**"
+      - ".github/workflows/ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS build, suite and iOS Simulator
+    runs-on: macos-15
+    env:
+      # Pinned. A workflow that accepts whichever Xcode the image defaults to
+      # is a workflow whose result changes under you when the image updates —
+      # so an absent pin FAILS with the available list rather than falling back.
+      XCODE_VERSION: "16.4"
+      IOS_DESTINATION: "generic/platform=iOS Simulator"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the pinned Xcode, or fail loudly
+        run: |
+          set -euo pipefail
+          APP="/Applications/Xcode_${XCODE_VERSION}.app"
+          if [ ! -d "$APP" ]; then
+            echo "::error::Xcode ${XCODE_VERSION} is not on this runner image."
+            echo "Available:"; ls -d /Applications/Xcode*.app || true
+            exit 1
+          fi
+          sudo xcode-select -s "$APP"
+          xcodebuild -version
+          swift --version
+          echo "iphonesimulator SDK: $(xcrun --sdk iphonesimulator --show-sdk-version)"
+
+      # ── 1. manifest ──────────────────────────────────────────────────────
+      - name: Validate the package manifest
+        run: |
+          set -euo pipefail
+          swift package dump-package > /tmp/dump.json
+          python3 - <<'PY'
+          import json
+          pkg = json.load(open("/tmp/dump.json"))
+          assert pkg["name"] == "WebmasterID", pkg["name"]
+          assert [p["name"] for p in pkg["products"]] == ["WebmasterID"], pkg["products"]
+          assert pkg["dependencies"] == [], pkg["dependencies"]
+          ios = [p for p in pkg["platforms"] if p["platformName"] == "ios"]
+          assert ios and ios[0]["version"] == "15.0", ios
+          for t in pkg["targets"]:
+              modes = [s["kind"]["swiftLanguageMode"]["_0"]
+                       for s in t.get("settings", [])
+                       if "swiftLanguageMode" in s.get("kind", {})]
+              assert "6" in modes, (t["name"], modes)
+          print("manifest OK — one product, iOS 15, Swift 6 everywhere, no dependencies")
+          PY
+
+      # ── 2/3/4. build, suite, strict concurrency ──────────────────────────
+      - name: Swift build and verification suite
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          swift build 2>&1 | tee /tmp/swift-build.log
+          if grep -E "^/.*Sources/.*warning:" /tmp/swift-build.log; then
+            echo "::error::the package emitted warnings under Swift 6 strict concurrency"
+            exit 1
+          fi
+          swift run WebmasterIDConformance
+
+      # ── 5. the binding iOS gate ──────────────────────────────────────────
+      - name: Build for a generic iOS Simulator destination
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          xcodebuild build \
+            -scheme WebmasterID \
+            -destination "${IOS_DESTINATION}" \
+            -derivedDataPath /tmp/dd \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee /tmp/ios-build.log
+
+      - name: Confirm the iOS 15 deployment target from the BUILD
+        run: |
+          set -euo pipefail
+          # Read from the compiler invocation, not from the manifest — the
+          # manifest was already checked, and this is what was actually used.
+          if ! grep -qE "\-target arm64-apple-ios15" /tmp/ios-build.log; then
+            echo "::error::the compiler was not invoked with an iOS 15 target"
+            grep -oE "\-target [a-z0-9.-]+" /tmp/ios-build.log | sort -u | head
+            exit 1
+          fi
+          if grep -E "Sources/.*warning:" /tmp/ios-build.log; then
+            echo "::error::the iOS build emitted warnings"
+            exit 1
+          fi
+
+      # ── 6. an external consumer ──────────────────────────────────────────
+      - name: Build the bundled example consumer for iOS
+        working-directory: Examples/QuickStart
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          # Building the SDK proves the SDK compiles. It says nothing about
+          # whether everything a consumer needs is `public`.
+          xcodebuild build \
+            -scheme QuickStart \
+            -destination "${IOS_DESTINATION}" \
+            -derivedDataPath /tmp/dd-consumer \
+            CODE_SIGNING_ALLOWED=NO \
+            | tee /tmp/consumer-build.log
+
+      # ── 7. the privacy manifest ──────────────────────────────────────────
+      - name: Confirm PrivacyInfo.xcprivacy is in the built product
+        run: |
+          set -euo pipefail
+          FOUND=$(find /tmp/dd -name "PrivacyInfo.xcprivacy" | head -5)
+          if [ -z "$FOUND" ]; then
+            echo "::error::the privacy manifest is not in the built product"
+            find /tmp/dd -name "*.bundle" | head -20
+            exit 1
+          fi
+          echo "$FOUND"
+          # Apple requires it at the bundle ROOT — which is what `.copy`
+          # (rather than `.process`) exists to guarantee.
+          echo "$FOUND" | grep -qE "\.bundle/PrivacyInfo\.xcprivacy$" \
+            || { echo "::error::the manifest is not at the bundle root"; exit 1; }
+          plutil -lint "$(echo "$FOUND" | head -1)"
+          # And it must still say what it says.
+          grep -A1 "NSPrivacyTracking<" Sources/WebmasterID/PrivacyInfo.xcprivacy | grep -q "<false/>" \
+            || { echo "::error::NSPrivacyTracking is not false"; exit 1; }
+          grep -A1 "NSPrivacyTrackingDomains" Sources/WebmasterID/PrivacyInfo.xcprivacy | grep -q "<array/>" \
+            || { echo "::error::a tracking domain was declared"; exit 1; }
+
+      # ── 8. secrets and production identifiers ────────────────────────────
+      - name: Scan for secrets, PII and production identifiers
+        run: |
+          set -euo pipefail
+          # ═══════════════════════════════════════════════════════════════
+          # PRECISE, NOT TRIGGER-HAPPY
+          # ═══════════════════════════════════════════════════════════════
+          #
+          # The first version of this step failed on the repository it exists
+          # to protect: it flagged the conformance suite's synthetic property
+          # id, the test that PROVES an email address is refused, a loopback
+          # address in a test double, and — best of all — its own credential
+          # pattern, written in this file. A scanner that cannot tell a fence
+          # from a mention gets silenced, and a silenced scanner protects
+          # nothing.
+          #
+          # So each allowance below is narrow and stated. Anything outside them
+          # still fails.
+          FAIL=0
+          # This workflow is excluded from the credential scan because it
+          # CONTAINS the patterns by necessity. Everything else is scanned.
+          SCANNED='--include=*.swift --include=*.md --include=*.json --include=*.xcprivacy'
+
+          # ── app property identifiers ──────────────────────────────────
+          # A production id is unpredictable. The two used here are not: the
+          # documentation placeholder is all-x, and the conformance suite uses
+          # one obvious ascending value. Both are allowlisted BY VALUE; a third
+          # id fails, which is the case that matters.
+          if grep -rnoE "\bap_[0-9a-z]{16}\b" . $SCANNED \
+               | grep -v "^\./\.build/" \
+               | grep -vE "ap_x{16}|ap_0123456789abcdef" ; then
+            echo "::error::an unrecognised app property identifier is present"
+            FAIL=1
+          fi
+
+          # ── credentials ───────────────────────────────────────────────
+          if grep -rnE "wmsk_[A-Za-z0-9]|sk_live_|whsec_|BEGIN [A-Z ]*PRIVATE KEY" . $SCANNED \
+               | grep -v "^\./\.build/" ; then
+            echo "::error::a credential-shaped token is present"
+            FAIL=1
+          fi
+
+          # ── email addresses ───────────────────────────────────────────
+          # `example.com`, `.org` and `.net` are reserved by RFC 2606 for
+          # documentation and cannot belong to a person. The conformance suite
+          # uses one deliberately, to prove such an address is REFUSED as an
+          # account key rather than hashed.
+          if grep -rnoE "[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}" . $SCANNED \
+               | grep -v "^\./\.build/" \
+               | grep -vE "@example\.(com|org|net)" ; then
+            echo "::error::a real email address is present"
+            FAIL=1
+          fi
+
+          # ── hosts ─────────────────────────────────────────────────────
+          # Loopback is allowed: a test double must point somewhere, and
+          # 127.0.0.1 reaches nothing outside the machine running it. A real
+          # WebmasterID host in source would mean CI could call production.
+          if grep -rnE "https?://(?!127\.0\.0\.1|localhost)[a-z0-9.-]*webmasterid[a-z0-9.-]*" . $SCANNED -P \
+               | grep -v "^\./\.build/" ; then
+            echo "::error::a WebmasterID endpoint is hard-coded in source"
+            FAIL=1
+          fi
+
+          # ── capabilities this SDK must not have ───────────────────────
+          if grep -rnE "import[[:space:]]+StoreKit|ASIdentifierManager|ATTrackingManager|identifierForVendor" . \
+               --include="*.swift" | grep -v "^\./\.build/" ; then
+            echo "::error::a forbidden framework or identifier entered the SDK"
+            FAIL=1
+          fi
+
+          # ── absolute developer paths ──────────────────────────────────
+          if grep -rnE "/Users/[a-z]|/private/tmp" . $SCANNED | grep -v "^\./\.build/" ; then
+            echo "::error::an absolute local path leaked into the export"
+            FAIL=1
+          fi
+
+          [ $FAIL -eq 0 ] && echo "scan clean"
+          exit $FAIL
+
+      # ── 9. release-tag consistency ───────────────────────────────────────
+      - name: Release tag consistency
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "tag: $TAG"
+          # The CHANGELOG must describe the version being tagged, and must not
+          # still call it unreleased.
+          grep -q "^## ${TAG}" CHANGELOG.md \
+            || { echo "::error::CHANGELOG.md has no section for ${TAG}"; exit 1; }
+          if grep -A2 "^## ${TAG}" CHANGELOG.md | grep -qi "unreleased"; then
+            echo "::error::CHANGELOG.md still marks ${TAG} as unreleased"
+            exit 1
+          fi
+          if grep -q "is planned and not yet tagged" README.md; then
+            echo "::error::README still says the release is not tagged"
+            exit 1
+          fi
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            /tmp/ios-build.log
+            /tmp/consumer-build.log
+            /tmp/swift-build.log
+          if-no-files-found: warn
