@@ -605,13 +605,32 @@ do {
 do {
     let transport = FakeTransport()
     let client = WebmasterIDClient(configuration: try TestSupport.configuration(transport: transport))
-    await withTaskGroup(of: Void.self) { group in
+    /*
+     * ⚠ A THROWING GROUP, BECAUSE `try?` WAS HIDING TWO PROBLEMS.
+     *
+     * The compiler saw one: `track` is `@discardableResult` and returns
+     * `Bool`, so `try?` produced an unused `Bool?` and Swift 6 warned about
+     * it. That warning is what stopped CI before it ever reached the iOS
+     * build, so the whole platform claim was blocked by this line.
+     *
+     * The test had the worse problem. `try?` DISCARDS a thrown validation
+     * error, so a `track` that refused all fifty events would have left this
+     * check asserting "50 delivered" against a client that had rejected every
+     * one — and the failure would have read as a delivery bug rather than what
+     * it was. A throwing group propagates the error out of `waitForAll`, so an
+     * unexpected refusal fails here, by name, at the point it happened.
+     *
+     * `waitForAll` also makes the wait explicit: every child task — the fifty
+     * tracks and the five flushes — completes before the assertions run.
+     */
+    try await withThrowingTaskGroup(of: Void.self) { group in
         for _ in 0..<50 {
-            group.addTask { try? await client.track(.appOpen) }
+            group.addTask { try await client.track(.appOpen) }
         }
         for _ in 0..<5 {
             group.addTask { await client.flush() }
         }
+        try await group.waitForAll()
     }
     await client.flush()
     let delivered = (0..<transport.sent.count).map { transport.events($0).count }.reduce(0, +)

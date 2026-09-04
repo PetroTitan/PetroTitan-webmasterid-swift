@@ -15,14 +15,47 @@ public struct AnalyticsSceneModifier: ViewModifier {
 
     public init(lifecycle: AnalyticsLifecycle) { self.lifecycle = lifecycle }
 
+    /*
+     * ═══════════════════════════════════════════════════════════════════════
+     * TWO SPELLINGS OF `onChange`, BECAUSE THE PACKAGE SUPPORTS iOS 15
+     * ═══════════════════════════════════════════════════════════════════════
+     *
+     * `onChange(of:perform:)` — the single-parameter closure — is deprecated
+     * as of iOS 17, and building against the iOS 18.5 SDK turns that
+     * deprecation into a warning. With `SWIFT_TREAT_WARNINGS_AS_ERRORS` it is
+     * an error, which is how CI found it: the SDK's own iOS build passed and
+     * this example's did not, because only this file uses SwiftUI.
+     *
+     * The fix is not to silence the warning. This package declares iOS 15, so
+     * BOTH spellings are needed — the modern two-parameter form where it
+     * exists, the original where it does not. Dropping the old branch would
+     * quietly raise the example's minimum above the SDK's.
+     */
+    @ViewBuilder
     public func body(content: Content) -> some View {
-        content.onChange(of: scenePhase) { phase in
-            Task {
-                switch phase {
-                case .active: await lifecycle.openedApp()
-                case .background: await lifecycle.enteredBackground()
-                default: break
-                }
+        if #available(iOS 17, macOS 14, tvOS 17, watchOS 10, *) {
+            content.onChange(of: scenePhase) { _, phase in
+                handle(phase)
+            }
+        } else {
+            content.onChange(of: scenePhase) { phase in
+                handle(phase)
+            }
+        }
+    }
+
+    /// The app boundary: a lifecycle hook cannot throw, so it decides here.
+    /// See `AnalyticsFailure`.
+    private func handle(_ phase: ScenePhase) {
+        Task {
+            switch phase {
+            case .active:
+                do { try await lifecycle.openedApp() }
+                catch { AnalyticsFailure.report(error, from: "scenePhase.active") }
+            case .background:
+                await lifecycle.enteredBackground()
+            default:
+                break
             }
         }
     }

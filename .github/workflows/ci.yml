@@ -14,7 +14,17 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # ⚠ EVERY BRANCH, NOT JUST `main`.
+    #
+    # This ADDS coverage; it removes nothing. `main`, tags and pull requests
+    # are all still triggers. The gap it closes is that a branch head had no
+    # run of its own — the previous change could only be validated by opening
+    # a pull request, so a contributor without one got no signal at all, and a
+    # branch could sit unverified for as long as it stayed unopened.
+    #
+    # macOS minutes are free on a public repository, so the cost of finding out
+    # early is nothing.
+    branches: ["**"]
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
     paths:
@@ -43,7 +53,14 @@ jobs:
       IOS_DESTINATION: "generic/platform=iOS Simulator"
 
     steps:
-      - uses: actions/checkout@v4
+      # ⚠ PINNED TO A COMMIT, NOT A TAG.
+      #
+      # A tag is mutable: whoever controls the action can move `v7` to
+      # different code, and this workflow builds the artefact people install.
+      # The SHA below is what `v7.0.1` pointed at when it was verified, and it
+      # cannot be repointed. Both actions also moved to node24, which is what
+      # resolves the "Node.js 20 is deprecated" annotation on the previous run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Select the pinned Xcode, or fail loudly
         run: |
@@ -58,6 +75,11 @@ jobs:
           xcodebuild -version
           swift --version
           echo "iphonesimulator SDK: $(xcrun --sdk iphonesimulator --show-sdk-version)"
+          # Emitted as notices so the toolchain is readable from a red run too,
+          # without admin rights on the log.
+          echo "::notice::xcodebuild $(xcodebuild -version | head -1 | awk '{print $2}')"
+          echo "::notice::swift $(swift --version 2>&1 | grep -o 'Swift version [0-9.]*' | head -1)"
+          echo "::notice::iphonesimulator SDK $(xcrun --sdk iphonesimulator --show-sdk-version)"
 
       # ── 1. manifest ──────────────────────────────────────────────────────
       - name: Validate the package manifest
@@ -85,24 +107,70 @@ jobs:
         run: |
           set -euo pipefail
           set -o pipefail
-          swift build 2>&1 | tee /tmp/swift-build.log
-          if grep -E "^/.*Sources/.*warning:" /tmp/swift-build.log; then
-            echo "::error::the package emitted warnings under Swift 6 strict concurrency"
+          # ═══════════════════════════════════════════════════════════════
+          # THE COMPILER DECIDES, NOT A REGEX
+          # ═══════════════════════════════════════════════════════════════
+          #
+          # This step used to build normally and then grep the log for
+          # `warning:`. That worked — it is what caught the `try?` warning —
+          # but it is one log-format change away from silently passing
+          # everything, and a grep cannot see a warning the build emitted to a
+          # path the pattern does not match.
+          #
+          # `-warnings-as-errors` makes the failure the compiler's own. The log
+          # is still captured, for reading, not for deciding.
+          #
+          # ⚠ FAILURES ARE ANNOTATED, NOT JUST LOGGED.
+          #
+          # The job-log download endpoint requires ADMIN rights even on a
+          # public repository, so a contributor looking at a red run sees
+          # "Process completed with exit code 1" and nothing else. Every
+          # diagnostic below is re-emitted as an annotation, which the checks
+          # API serves to anyone.
+          if ! swift build -Xswiftc -warnings-as-errors 2>&1 | tee /tmp/swift-build.log; then
+            grep -E "error:|warning:" /tmp/swift-build.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::swift build failed under -warnings-as-errors"
             exit 1
           fi
-          swift run WebmasterIDConformance
+          if ! swift run WebmasterIDConformance 2>&1 | tee /tmp/conformance.log; then
+            grep -E "FAIL|error:" /tmp/conformance.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::the conformance suite did not pass"
+            exit 1
+          fi
+          tail -2 /tmp/conformance.log
+
+      - name: Mutation gates — prove the warning gate can fail
+        run: |
+          set -euo pipefail
+          # A gate nobody has seen go red is a hope. This reintroduces the
+          # exact defect that blocked the previous run and requires the build
+          # to reject it — and separately shows that WITHOUT the flag the same
+          # defect builds cleanly, which is what makes the flag the gate.
+          ./Scripts/mutation-gates.sh
 
       # ── 5. the binding iOS gate ──────────────────────────────────────────
       - name: Build for a generic iOS Simulator destination
         run: |
           set -euo pipefail
           set -o pipefail
-          xcodebuild build \
+          # `SWIFT_TREAT_WARNINGS_AS_ERRORS` is the Xcode-side equivalent of
+          # `-warnings-as-errors`: the iOS build must be held to the same bar
+          # as the macOS one, or a warning that only appears when compiling for
+          # iOS would pass unnoticed.
+          if ! xcodebuild build \
             -scheme WebmasterID \
             -destination "${IOS_DESTINATION}" \
             -derivedDataPath /tmp/dd \
             CODE_SIGNING_ALLOWED=NO \
-            | tee /tmp/ios-build.log
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            2>&1 | tee /tmp/ios-build.log; then
+            grep -E "error:|warning:" /tmp/ios-build.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::the iOS Simulator build failed"
+            exit 1
+          fi
 
       - name: Confirm the iOS 15 deployment target from the BUILD
         run: |
@@ -114,6 +182,10 @@ jobs:
             grep -oE "\-target [a-z0-9.-]+" /tmp/ios-build.log | sort -u | head
             exit 1
           fi
+          # The build itself already fails on a warning
+          # (SWIFT_TREAT_WARNINGS_AS_ERRORS). This is a second, cheap look at
+          # the log — kept because it names the file, which an error does not
+          # always do clearly in xcodebuild output.
           if grep -E "Sources/.*warning:" /tmp/ios-build.log; then
             echo "::error::the iOS build emitted warnings"
             exit 1
@@ -127,12 +199,33 @@ jobs:
           set -o pipefail
           # Building the SDK proves the SDK compiles. It says nothing about
           # whether everything a consumer needs is `public`.
-          xcodebuild build \
+          # ⚠ `SWIFT_SUPPRESS_WARNINGS=NO` IS REQUIRED HERE, AND ONLY HERE.
+          #
+          # xcodebuild suppresses warnings from package DEPENDENCIES by
+          # default — reasonable, since you usually cannot fix them. This
+          # package's only dependency is the SDK in this same repository, and
+          # combining that default with the as-errors flag produced:
+          #
+          #   error: Conflicting options '-warnings-as-errors' and
+          #          '-suppress-warnings' (in target 'WebmasterID')
+          #
+          # Turning suppression off resolves the conflict AND holds the
+          # dependency to the same bar, which is correct when the dependency is
+          # ours. The SDK's own build above needs neither, because it has no
+          # dependencies to suppress.
+          if ! xcodebuild build \
             -scheme QuickStart \
             -destination "${IOS_DESTINATION}" \
             -derivedDataPath /tmp/dd-consumer \
             CODE_SIGNING_ALLOWED=NO \
-            | tee /tmp/consumer-build.log
+            SWIFT_SUPPRESS_WARNINGS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            2>&1 | tee /tmp/consumer-build.log; then
+            grep -E "error:|warning:" /tmp/consumer-build.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::the example consumer failed to build for iOS"
+            exit 1
+          fi
 
       # ── 7. the privacy manifest ──────────────────────────────────────────
       - name: Confirm PrivacyInfo.xcprivacy is in the built product
@@ -258,7 +351,7 @@ jobs:
 
       - name: Upload build logs
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: build-logs
           path: |
