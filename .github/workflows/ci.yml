@@ -75,6 +75,11 @@ jobs:
           xcodebuild -version
           swift --version
           echo "iphonesimulator SDK: $(xcrun --sdk iphonesimulator --show-sdk-version)"
+          # Emitted as notices so the toolchain is readable from a red run too,
+          # without admin rights on the log.
+          echo "::notice::xcodebuild $(xcodebuild -version | head -1 | awk '{print $2}')"
+          echo "::notice::swift $(swift --version 2>&1 | grep -o 'Swift version [0-9.]*' | head -1)"
+          echo "::notice::iphonesimulator SDK $(xcrun --sdk iphonesimulator --show-sdk-version)"
 
       # ── 1. manifest ──────────────────────────────────────────────────────
       - name: Validate the package manifest
@@ -114,8 +119,27 @@ jobs:
           #
           # `-warnings-as-errors` makes the failure the compiler's own. The log
           # is still captured, for reading, not for deciding.
-          swift build -Xswiftc -warnings-as-errors 2>&1 | tee /tmp/swift-build.log
-          swift run WebmasterIDConformance
+          #
+          # ⚠ FAILURES ARE ANNOTATED, NOT JUST LOGGED.
+          #
+          # The job-log download endpoint requires ADMIN rights even on a
+          # public repository, so a contributor looking at a red run sees
+          # "Process completed with exit code 1" and nothing else. Every
+          # diagnostic below is re-emitted as an annotation, which the checks
+          # API serves to anyone.
+          if ! swift build -Xswiftc -warnings-as-errors 2>&1 | tee /tmp/swift-build.log; then
+            grep -E "error:|warning:" /tmp/swift-build.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::swift build failed under -warnings-as-errors"
+            exit 1
+          fi
+          if ! swift run WebmasterIDConformance 2>&1 | tee /tmp/conformance.log; then
+            grep -E "FAIL|error:" /tmp/conformance.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::the conformance suite did not pass"
+            exit 1
+          fi
+          tail -2 /tmp/conformance.log
 
       - name: Mutation gates — prove the warning gate can fail
         run: |
@@ -135,13 +159,18 @@ jobs:
           # `-warnings-as-errors`: the iOS build must be held to the same bar
           # as the macOS one, or a warning that only appears when compiling for
           # iOS would pass unnoticed.
-          xcodebuild build \
+          if ! xcodebuild build \
             -scheme WebmasterID \
             -destination "${IOS_DESTINATION}" \
             -derivedDataPath /tmp/dd \
             CODE_SIGNING_ALLOWED=NO \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
-            | tee /tmp/ios-build.log
+            2>&1 | tee /tmp/ios-build.log; then
+            grep -E "error:|warning:" /tmp/ios-build.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::the iOS Simulator build failed"
+            exit 1
+          fi
 
       - name: Confirm the iOS 15 deployment target from the BUILD
         run: |
