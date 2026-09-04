@@ -25,7 +25,7 @@ Choose the `WebmasterID` library product.
 > SDK code is identical, but its release verification was not deterministic —
 > see [`CHANGELOG.md`](../CHANGELOG.md).
 
-In `Package.swift`, once the tag exists:
+In `Package.swift`:
 
 ```swift
 dependencies: [
