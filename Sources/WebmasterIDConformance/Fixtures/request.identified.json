@@ -1,0 +1,21 @@
+{
+  "v": 1,
+  "property_id": "ap_0123456789abcdef",
+  "events": [
+    {
+      "app_build": "412",
+      "app_version": "3.1.0",
+      "consent": "analytics_allowed",
+      "event_id": "c4e2d3a5-6f70-4b8c-9dae-1f2a3b4c5d6e",
+      "event_name": "screen_view",
+      "external_user_id": "acct_9f2b71",
+      "installation_id": "i-Kd82ndJs01mZ",
+      "locale": "en-GB",
+      "occurred_at": "2026-09-03T12:00:05.250Z",
+      "os_major": 18,
+      "screen": "BookingDetail",
+      "session_id": "s-Ab3dEf9xYz",
+      "timezone": "Europe/Prague"
+    }
+  ]
+}

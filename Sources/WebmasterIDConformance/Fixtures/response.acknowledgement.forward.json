@@ -1,0 +1,6 @@
+{
+  "accepted": 1,
+  "deduplicated": 0,
+  "rejected": 0,
+  "server_hint": "a field a future server might add; the SDK must ignore it"
+}

@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "property_id": "ap_0123456789abcdef",
+  "events": [
+    {
+      "actor_role": "consumer",
+      "consent": "restricted",
+      "eligibility_outcome": "undetermined",
+      "event_id": "d5f3e4b6-7081-4c9d-8ebf-2a3b4c5d6e7f",
+      "event_name": "cta_tap",
+      "cta_id": "book_now",
+      "occurred_at": "2026-09-03T12:00:10.000Z",
+      "screen": "BookingDetail",
+      "session_id": "s-Ab3dEf9xYz"
+    }
+  ]
+}

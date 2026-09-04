@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "property_id": "ap_0123456789abcdef",
+  "events": [
+    {
+      "consent": "analytics_allowed",
+      "event_id": "b3f1c2d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "event_name": "app_open",
+      "occurred_at": "2026-09-03T12:00:00.000Z",
+      "session_id": "s-Ab3dEf9xYz"
+    }
+  ]
+}
