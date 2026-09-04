@@ -14,10 +14,18 @@ express them.
 | | |
 | --- | --- |
 | Source on `main` | the current snapshot |
-| Stable release | **`1.0.0` is planned and not yet tagged** |
+| Stable release | **`1.0.0`** — tagged at `c5da2a8` |
 
-> Until the `1.0.0` tag exists, `from: "1.0.0"` will not resolve. Depend on a
-> branch or a revision in the meantime.
+> `1.0.0` is published and installable. `main` moves ahead of it; depend on the
+> version unless you specifically want unreleased work.
+>
+> ⚠ **Its tag-triggered CI run is red**, through no fault of the package: a
+> timing-dependent assertion in the verification suite lost a race on a loaded
+> runner. The identical tree passed on `main`
+> ([run 33870867024](https://github.com/PetroTitan/PetroTitan-webmasterid-swift/actions/runs/33870867024)),
+> and the flake is fixed on `main` — but a published tag is immutable, so the
+> red run stands rather than being papered over. See
+> [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Install
 

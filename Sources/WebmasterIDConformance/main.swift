@@ -587,11 +587,19 @@ do {
      * after a settled response. So the transport below succeeds, and the
      * cancellation happens while the request is in flight.
      */
-    let transport = SlowTransport()
+    let transport = GateTransport()
     let client = WebmasterIDClient(configuration: try TestSupport.configuration(transport: transport))
     try await client.track(.appOpen)
     let task = Task { await client.flush() }
-    try? await Task.sleep(nanoseconds: 20_000_000)
+    /*
+     * ⚠ WAIT TO BE TOLD, DO NOT SLEEP AND HOPE.
+     *
+     * This slept 20 ms against a 120 ms request. On a loaded runner the flush
+     * finished first, the queue emptied legitimately, and the check reported a
+     * loss that had not happened — which is how 1.0.0's tag run went red on a
+     * commit whose main run was green.
+     */
+    await transport.waitUntilInFlight()
     task.cancel()
     _ = await task.value
     let diag = await client.diagnostics()

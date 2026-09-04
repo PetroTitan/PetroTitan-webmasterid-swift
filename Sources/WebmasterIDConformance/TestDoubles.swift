@@ -217,17 +217,74 @@ enum TestSupport {
 
 /// A transport that suspends long enough for a cancellation to land while a
 /// request is genuinely in flight, then succeeds.
-final class SlowTransport: WebmasterIDTransport, @unchecked Sendable {
-    private let delay: UInt64
+/// A transport that ANNOUNCES when a request is in flight.
+///
+/// ═══════════════════════════════════════════════════════════════════════════
+/// WHY THIS REPLACED A SLEEP
+/// ═══════════════════════════════════════════════════════════════════════════
+///
+/// Its predecessor slept 120 ms in `send` while the cancellation check slept
+/// 20 ms and then cancelled — a race, and one that lost on a loaded CI runner:
+/// the flush finished first, the queue emptied LEGITIMATELY, and the check
+/// reported "expected 1 queued, got 0" as though work had been dropped.
+///
+/// That flake failed the tag-triggered run for 1.0.0 on the very commit whose
+/// main-branch run had been green. A release gate that depends on how busy a
+/// machine is cannot tell a regression from a bad afternoon.
+///
+/// So there is no sleep to lose: the test waits to be TOLD the request has
+/// started, and cancels then. The first request parks until cancelled; every
+/// later one returns at once, so the follow-up assertion — that the preserved
+/// event is delivered on the next flush — is equally deterministic.
+final class GateTransport: WebmasterIDTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var inFlight = false
+    private var firstRequestDone = false
 
-    init(milliseconds: UInt64 = 120) { delay = milliseconds * 1_000_000 }
+    /// Resumes the moment `send` has been entered. No polling, no deadline.
+    func waitUntilInFlight() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if inFlight {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters.append(continuation)
+            lock.unlock()
+        }
+    }
 
     func send(_ request: URLRequest) async throws -> WebmasterIDHTTPResponse {
         _ = request
-        try await Task.sleep(nanoseconds: delay)
+        let isFirst = announce()
+        if isFirst {
+            /*
+             * Long enough that the cancellation ALWAYS lands first — the test
+             * never waits this out, because it cancels as soon as it is
+             * signalled. `Task.sleep` throws `CancellationError` when the task
+             * is cancelled, which is exactly the transport failure the client
+             * must treat as "keep the work".
+             */
+            try await Task.sleep(nanoseconds: 30_000_000_000)
+        }
         return WebmasterIDHTTPResponse(
             status: 200,
             body: Data(#"{"accepted":1,"deduplicated":0,"rejected":0}"#.utf8)
         )
+    }
+
+    /// - Returns: whether this was the first request.
+    private func announce() -> Bool {
+        lock.lock()
+        inFlight = true
+        let isFirst = !firstRequestDone
+        firstRequestDone = true
+        let pending = waiters
+        waiters = []
+        lock.unlock()
+        pending.forEach { $0.resume() }
+        return isFirst
     }
 }
