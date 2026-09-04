@@ -14,7 +14,17 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    # ⚠ EVERY BRANCH, NOT JUST `main`.
+    #
+    # This ADDS coverage; it removes nothing. `main`, tags and pull requests
+    # are all still triggers. The gap it closes is that a branch head had no
+    # run of its own — the previous change could only be validated by opening
+    # a pull request, so a contributor without one got no signal at all, and a
+    # branch could sit unverified for as long as it stayed unopened.
+    #
+    # macOS minutes are free on a public repository, so the cost of finding out
+    # early is nothing.
+    branches: ["**"]
     tags: ["[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
     paths:
