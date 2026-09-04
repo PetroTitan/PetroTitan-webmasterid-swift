@@ -199,11 +199,26 @@ jobs:
           set -o pipefail
           # Building the SDK proves the SDK compiles. It says nothing about
           # whether everything a consumer needs is `public`.
+          # ⚠ `SWIFT_SUPPRESS_WARNINGS=NO` IS REQUIRED HERE, AND ONLY HERE.
+          #
+          # xcodebuild suppresses warnings from package DEPENDENCIES by
+          # default — reasonable, since you usually cannot fix them. This
+          # package's only dependency is the SDK in this same repository, and
+          # combining that default with the as-errors flag produced:
+          #
+          #   error: Conflicting options '-warnings-as-errors' and
+          #          '-suppress-warnings' (in target 'WebmasterID')
+          #
+          # Turning suppression off resolves the conflict AND holds the
+          # dependency to the same bar, which is correct when the dependency is
+          # ours. The SDK's own build above needs neither, because it has no
+          # dependencies to suppress.
           if ! xcodebuild build \
             -scheme QuickStart \
             -destination "${IOS_DESTINATION}" \
             -derivedDataPath /tmp/dd-consumer \
             CODE_SIGNING_ALLOWED=NO \
+            SWIFT_SUPPRESS_WARNINGS=NO \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
             2>&1 | tee /tmp/consumer-build.log; then
             grep -E "error:|warning:" /tmp/consumer-build.log | head -25 \
