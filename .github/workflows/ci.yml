@@ -199,13 +199,18 @@ jobs:
           set -o pipefail
           # Building the SDK proves the SDK compiles. It says nothing about
           # whether everything a consumer needs is `public`.
-          xcodebuild build \
+          if ! xcodebuild build \
             -scheme QuickStart \
             -destination "${IOS_DESTINATION}" \
             -derivedDataPath /tmp/dd-consumer \
             CODE_SIGNING_ALLOWED=NO \
             SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
-            | tee /tmp/consumer-build.log
+            2>&1 | tee /tmp/consumer-build.log; then
+            grep -E "error:|warning:" /tmp/consumer-build.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::the example consumer failed to build for iOS"
+            exit 1
+          fi
 
       # ── 7. the privacy manifest ──────────────────────────────────────────
       - name: Confirm PrivacyInfo.xcprivacy is in the built product
