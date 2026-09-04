@@ -14,25 +14,24 @@ express them.
 | | |
 | --- | --- |
 | Source on `main` | the current snapshot |
-| Stable release | **`1.0.0`** — tagged at `c5da2a8` |
+| Recommended release | **`1.0.1`** |
+| Previous release | `1.0.0` — immutable, superseded |
 
-> `1.0.0` is published and installable. `main` moves ahead of it; depend on the
-> version unless you specifically want unreleased work.
+> **`1.0.1` supersedes `1.0.0`, and the SDK code is identical between them.**
+> What differs is the release verification: 1.0.0's tag CI went red on a
+> timing-dependent test that lost a race on a loaded runner, not on anything in
+> the package. 1.0.1 gives the same code a release whose verification is
+> deterministic.
 >
-> ⚠ **Its tag-triggered CI run is red**, through no fault of the package: a
-> timing-dependent assertion in the verification suite lost a race on a loaded
-> runner. The identical tree passed on `main`
-> ([run 33870867024](https://github.com/PetroTitan/PetroTitan-webmasterid-swift/actions/runs/33870867024)),
-> and the flake is fixed on `main` — but a published tag is immutable, so the
-> red run stands rather than being papered over. See
-> [`CHANGELOG.md`](CHANGELOG.md).
+> 1.0.0 remains published and was never moved. Its history, and why the red run
+> stands, are in [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Install
 
 ```swift
 .package(
     url: "https://github.com/PetroTitan/PetroTitan-webmasterid-swift.git",
-    from: "1.0.0"
+    from: "1.0.1"
 )
 ```
 

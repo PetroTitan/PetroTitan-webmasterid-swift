@@ -2,22 +2,46 @@
 
 ## Unreleased
 
+_Nothing yet._
+
+## 1.0.1 — 2026-09-04
+
+**The SDK itself is byte-for-byte identical to 1.0.0.** No runtime source, no
+public API, no `Package.swift`, no `PrivacyInfo.xcprivacy`, no LICENSE and no
+dependency changed. If you are on 1.0.0 and it works, nothing here fixes a
+problem you have.
+
+What changed is the release verification, and why that mattered enough to cut a
+version for it.
+
 ### Fixed
 
-- The cancellation check in the verification suite raced a 20 ms sleep against
-  a 120 ms request. On a loaded runner the flush finished first, the queue
-  emptied legitimately, and the check reported a loss that had not occurred —
-  which is how 1.0.0's tag-triggered CI went red on a commit whose `main` run
-  was green. The transport now signals when a request is in flight and the
-  test cancels at that point, so nothing depends on machine load.
+- **The cancellation check is deterministic.** It raced a 20 ms sleep against a
+  120 ms request. On a loaded runner the flush finished first, the queue
+  emptied *legitimately*, and the check reported a loss that had not occurred.
+  The transport now signals when a request is in flight and the test cancels at
+  that point, so nothing depends on how busy the machine is.
+
+  That flake is why 1.0.0's tag-triggered CI went red on a commit whose `main`
+  run was green. A release gate that turns on machine load cannot tell a
+  regression from a bad afternoon — so 1.0.1 exists to give the same code a
+  release whose verification means something.
+
+### Unchanged
+
+Consent behaviour, the offline queue, retry and idempotency semantics, the
+privacy manifest, the iOS 15 minimum, and the continued absence of StoreKit,
+trusted revenue, advertising identifiers, location and arbitrary metadata.
 
 ## 1.0.0
 
 The first public release of the WebmasterID Swift SDK, tagged at `c5da2a8`.
 
-> ⚠ **Its tag-triggered CI run is red** because of the flake described above,
-> not because of anything in the package: the same tree passed on `main`. A
-> published tag is immutable and was not moved. The fix is forward-only.
+> ⚠ **Its tag-triggered CI run is red** because of the flake described under
+> 1.0.1 — a timing-dependent test in the release verification, not a defect in
+> the package. The same tree passed on `main`. **1.0.0 remains immutable and
+> was never moved**; the correction is forward-only, which is the only honest
+> direction once a version is published.
 
 ### Added
 
