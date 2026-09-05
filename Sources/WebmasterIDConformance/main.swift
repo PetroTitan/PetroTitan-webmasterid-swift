@@ -1200,6 +1200,69 @@ do {
                 !storeKitCode.contains("@_spi") && !coreCode.contains("@_spi"))
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// LIVE ENDPOINT — REAL SOCKET, REAL SERVER, REAL DATABASE
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// ⚠ EVERY CHECK ABOVE USES A TEST TRANSPORT. That proves the SDK builds the
+// right bytes; it proves nothing about whether a real server accepts them.
+// The shared fixture pins the two repositories to the same JSON, which is the
+// next best thing — but it still compares text, not behaviour.
+//
+// When `WEBMASTERID_LIVE_ENDPOINT` is set, this block sends a REAL request over
+// a REAL socket, with `URLSession`, to a Fastify server running the production
+// route against a real PostgreSQL. The JWS is supplied by that harness, signed
+// by its own Apple-shaped test PKI, because this side cannot mint one.
+//
+// Unset in CI: it needs a server. The private monorepo's acceptance script sets
+// it and runs this binary.
+if let endpoint = ProcessInfo.processInfo.environment["WEBMASTERID_LIVE_ENDPOINT"],
+    let jws = ProcessInfo.processInfo.environment["WEBMASTERID_LIVE_JWS"],
+    let property = ProcessInfo.processInfo.environment["WEBMASTERID_LIVE_PROPERTY"],
+    let base = URL(string: endpoint)
+{
+    let storage = FakeStoreKitStorage()
+    let analytics = WebmasterIDClient(
+        configuration: try WebmasterIDConfiguration(
+            appPropertyID: property,
+            baseURL: base,
+            /* The REAL transport. No double anywhere in this block. */
+            transport: WebmasterIDURLSessionTransport(),
+            storage: FakeStorage(),
+            identityStore: WebmasterIDMemoryIdentityStore()
+        )
+    )
+    let live = try await WebmasterIDStoreKit.attached(
+        to: analytics,
+        configuration: WebmasterIDStoreKitConfiguration(
+            baseURL: base,
+            transport: WebmasterIDURLSessionTransport(),
+            storage: storage
+        )
+    )
+    await analytics.setConsent(.analyticsAllowed)
+    try await analytics.identify(externalUserID: "acct-live-42")
+
+    let outcome = await live.submitForTesting(jws: jws)
+    await check("LIVE1. the evidence was stored before delivery", outcome == .stored, "\(outcome)")
+
+    let d = await live.diagnostics()
+    await check("*** LIVE2. a REAL server accepted a REAL request over a REAL socket ***",
+                d.lastPaymentOutcome == .accepted,
+                "outcome=\(String(describing: d.lastPaymentOutcome)) http=\(String(describing: d.lastHTTPStatus))")
+    await check("*** LIVE3. …and linked the identity the SDK sent ***",
+                d.lastIdentityOutcome == .linked, String(describing: d.lastIdentityOutcome))
+    await check("LIVE4. the queue drained, so the acknowledgement was durable",
+                d.pending == 0, "\(d.pending)")
+
+    /* A second submission of the same signature must deduplicate, not double. */
+    let again = await live.submitForTesting(jws: jws)
+    let d2 = await live.diagnostics()
+    await check("LIVE5. a resubmission is refused locally as already-known or deduplicated by the server",
+                again == .alreadyQueued || d2.lastPaymentOutcome == .duplicate,
+                "\(again) / \(String(describing: d2.lastPaymentOutcome))")
+}
+
 let (passed, failures) = await results.summary()
 print("\n  \(passed)/\(passed + failures.count) guarantees held")
 if !failures.isEmpty {

@@ -48,6 +48,8 @@ public actor WebmasterIDStoreKit {
     private var unverifiedRefused = 0
     private var retryAfterHonoured = 0
     private var notBefore: Date?
+    /// The last HTTP status seen. A count-free integer; no body, no headers.
+    private var lastStatus: Int?
 
     private let clock: any WebmasterIDClock
     private let random: any WebmasterIDRandomSource
@@ -328,7 +330,9 @@ public actor WebmasterIDStoreKit {
         let response: WebmasterIDHTTPResponse
         do {
             response = try await configuration.transport.send(request)
+            lastStatus = response.status
         } catch {
+            lastStatus = nil
             /* Transport failure. The evidence stays; nothing is inferred. */
             backOff(after: item)
             return
@@ -429,6 +433,7 @@ public actor WebmasterIDStoreKit {
             unverifiedRefused: unverifiedRefused,
             retryAfterHonoured: retryAfterHonoured,
             recoveredFromCorruption: queue.recoveredFromCorruption,
+            lastHTTPStatus: lastStatus,
             lastEnqueueOutcome: lastEnqueueOutcome,
             lastPaymentOutcome: lastPaymentOutcome,
             lastIdentityOutcome: lastIdentityOutcome
@@ -498,6 +503,10 @@ public struct WebmasterIDStoreKitDiagnostics: Sendable, Equatable {
     public let unverifiedRefused: Int
     public let retryAfterHonoured: Int
     public let recoveredFromCorruption: Bool
+    /// The last HTTP status the server returned. ⚠ A NUMBER ONLY — no body, no
+    /// headers, nothing identifying. It exists so an integrator debugging a
+    /// stuck queue can tell a 503 from a 400 without a packet capture.
+    public let lastHTTPStatus: Int?
     public let lastEnqueueOutcome: WebmasterIDStoreKitEnqueueOutcome?
     public let lastPaymentOutcome: WebmasterIDStoreKitPaymentOutcome?
     public let lastIdentityOutcome: WebmasterIDStoreKitIdentityOutcome?
