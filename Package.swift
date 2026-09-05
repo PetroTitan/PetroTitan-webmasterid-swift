@@ -35,6 +35,21 @@ let package = Package(
     ],
     products: [
         .library(name: "WebmasterID", targets: ["WebmasterID"]),
+        /*
+         * ⚠ A SEPARATE, OPTIONAL PRODUCT — NOT A DEPENDENCY OF THE CORE.
+         *
+         * An app that does not sell anything must not link StoreKit, and on
+         * Apple's platforms merely importing a framework is visible: it shows
+         * up in the binary, in App Store review's automated checks, and in the
+         * privacy questionnaire an integrator has to answer. Folding StoreKit
+         * into `WebmasterID` would make every consumer answer for a capability
+         * they never asked for.
+         *
+         * So the dependency runs one way only — `WebmasterIDStoreKit` depends
+         * on `WebmasterID` — and the conformance suite asserts the core still
+         * contains no `import StoreKit`.
+         */
+        .library(name: "WebmasterIDStoreKit", targets: ["WebmasterIDStoreKit"]),
     ],
     targets: [
         .target(
@@ -51,6 +66,11 @@ let package = Package(
                  */
                 .copy("PrivacyInfo.xcprivacy"),
             ],
+            swiftSettings: [.swiftLanguageMode(.v6)]
+        ),
+        .target(
+            name: "WebmasterIDStoreKit",
+            dependencies: ["WebmasterID"],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         /*
@@ -70,7 +90,7 @@ let package = Package(
          */
         .executableTarget(
             name: "WebmasterIDConformance",
-            dependencies: ["WebmasterID"],
+            dependencies: ["WebmasterID", "WebmasterIDStoreKit"],
             resources: [.copy("Fixtures")],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),

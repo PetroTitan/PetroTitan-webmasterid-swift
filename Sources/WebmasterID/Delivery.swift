@@ -175,9 +175,19 @@ enum WebmasterIDBatcher {
 // BACKOFF
 // ───────────────────────────────────────────────────────────────────────────
 
-enum WebmasterIDBackoff {
-    static let base: Double = 2
-    static let cap: Double = 300
+/// Shared with `WebmasterIDStoreKit` via `package` access.
+///
+/// ⚠ `package`, NOT `public`, AND NOT AN UNDERSCORED SPI. Two targets in this
+/// package need the SAME retry curve — a StoreKit queue that backed off on its
+/// own schedule would return in a different wave from the event queue and
+/// double the reconnect storm this jitter exists to prevent. `public` would put
+/// a retry curve in the SDK's supported surface, where changing it becomes a
+/// breaking change; an underscored SPI would be a convention asking to be
+/// ignored. `package` says exactly what is true: internal to this package,
+/// visible across its targets.
+package enum WebmasterIDBackoff {
+    package static let base: Double = 2
+    package static let cap: Double = 300
 
     /// Exponential with FULL jitter, bounded.
     ///
@@ -186,7 +196,7 @@ enum WebmasterIDBackoff {
     /// at the same moment from returning in the same synchronised wave. The cap
     /// stops the interval growing past the point where the app would be
     /// terminated before the next attempt anyway.
-    static func delay(attempt: Int, random: Double) -> Double {
+    package static func delay(attempt: Int, random: Double) -> Double {
         let exponential = min(cap, base * pow(2, Double(max(0, attempt))))
         return exponential * min(max(random, 0), 1)
     }

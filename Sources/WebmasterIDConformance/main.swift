@@ -1,5 +1,6 @@
 import Foundation
 import WebmasterID
+import WebmasterIDStoreKit
 
 /// M4 — the conformance suite.
 ///
@@ -693,6 +694,321 @@ do {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STOREKIT — THE TRUST BOUNDARY, THE QUEUE, AND WHAT IS NOT IN THE SOURCES
+// ═══════════════════════════════════════════════════════════════════════════
+
+do {
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    transport.enqueue(payment: "accepted", identity: "linked")
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(
+            storage: storage, transport: transport, externalUserID: "acct-42"))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("a"))
+    let body = transport.object(0)
+
+    await check("SK1. the envelope declares contract v2",
+                body["contract_version"] as? Int == 2, "\(body)")
+    await check("SK2. it carries the JWS verbatim",
+                body["signed_transaction"] as? String == StoreKitTestSupport.jws("a"))
+    await check("SK3. the identity claim is nested, not top-level",
+                (body["identity"] as? [String: Any])?["external_user_id"] as? String == "acct-42",
+                "\(body)")
+
+    /*
+     * ⚠ THE CENTRAL GUARANTEE: APPLE DECIDES MONEY.
+     *
+     * Not "these keys are filtered out" — there is no property on the
+     * submission type that could hold them. This asserts the wire bytes.
+     */
+    /*
+     * ⚠ ASSERTED AS A CLOSED KEY SET, NOT AS ABSENT SUBSTRINGS.
+     *
+     * The substring version of this check FAILED on its first run — and it was
+     * the check that was wrong, not the SDK. `client_transaction_id` contains
+     * `transaction_id`, so a blanket "the body must not contain
+     * transaction_id" flags the one field the contract requires. That is the
+     * same mention-versus-use confusion that has bitten this project before,
+     * and the fix is the same: compare structure, not text.
+     *
+     * Equality against the whole set is also strictly stronger. A denylist only
+     * catches the forbidden keys someone remembered to list; this fails for ANY
+     * key that appears and should not — including one nobody has thought of.
+     */
+    let keys = Set(body.keys)
+    await check("*** SK4. the envelope carries EXACTLY the six contract keys, and no other ***",
+                keys == [
+                    "contract_version", "app_property_id", "signed_transaction",
+                    "client_transaction_id", "consent", "identity",
+                ],
+                "\(keys.sorted())")
+
+    let identityKeys = Set((body["identity"] as? [String: Any])?.keys ?? [:].keys)
+    await check("*** SK4b. identity carries ONLY the user claim — no client copy of Apple's token ***",
+                identityKeys == ["external_user_id"], "\(identityKeys.sorted())")
+
+    let d5 = await sk.diagnostics()
+    await check("SK5. the accepted+linked evidence is retired", d5.pending == 0)
+}
+
+do {
+    /* The discard rule — the half that is easy to get wrong. */
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    transport.enqueue(payment: "accepted", identity: "retryable")
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(
+            storage: storage, transport: transport, externalUserID: "acct-42"))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("b"))
+    let d6 = await sk.diagnostics()
+    await check("*** SK6. a BANKED payment whose identity is retryable KEEPS its evidence ***",
+                d6.pending == 1, "pending=\(d6.pending)")
+
+    transport.enqueue(payment: "duplicate", identity: "linked")
+    await sk.flush()
+    let d7 = await sk.diagnostics()
+    await check("SK7. …and the retry deduplicates the payment and converges the identity",
+                d7.pending == 0 && d7.lastIdentityOutcome == .linked)
+}
+
+do {
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    transport.enqueue(payment: "rejected", identity: "not_provided")
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("c"))
+    let d8 = await sk.diagnostics()
+    await check("SK8. `rejected` is terminal — the queue drains rather than looping forever",
+                d8.pending == 0)
+}
+
+do {
+    /* A non-2xx is not an acknowledgement. */
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: #"{"error":"temporarily_unavailable"}"#)
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("d"))
+    let d9 = await sk.diagnostics()
+    await check("*** SK9. a 503 KEEPS the evidence — a verifier outage is not a refusal ***",
+                d9.pending == 1)
+
+    transport.failOnce()
+    await sk.flush()
+    let d10 = await sk.diagnostics()
+    await check("SK10. a transport failure keeps it too", d10.pending == 1)
+}
+
+do {
+    /* Consent. */
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(
+            storage: storage, transport: transport, consent: .notDetermined,
+            externalUserID: "acct-42"))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("e"))
+    let d11 = await sk.diagnostics()
+    await check("*** SK11. with consent undetermined, no evidence is queued, stored or sent ***",
+                d11.pending == 0 && transport.count == 0 && storage.names.isEmpty,
+                "files=\(storage.names) sent=\(transport.count)")
+}
+
+do {
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(
+            storage: storage, transport: transport, consent: .decided(.restricted),
+            externalUserID: "acct-42"))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("f"))
+    let raw = String(decoding: transport.bodies.first ?? Data(), as: UTF8.self)
+
+    /*
+     * ⚠ THE PAYMENT SURVIVES `restricted`; THE USER DOES NOT.
+     *
+     * Refusing to report the purchase would lose revenue while protecting
+     * nothing — it is the merchant's own record of a transaction. What is
+     * dropped is the identity claim, and it is dropped ON THE DEVICE so it
+     * cannot be read by a proxy on the way to a server that would drop it too.
+     */
+    await check("*** SK12. under `restricted` the purchase is sent and the user is not ***",
+                transport.count == 1 && !raw.contains("identity")
+                    && !raw.contains("acct-42"), raw)
+}
+
+do {
+    /* The queue is durable and deduplicated. */
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("g"))
+    await check("SK13. evidence is persisted BEFORE any delivery is attempted",
+                storage.names.contains("storekit-evidence.v1.json"), "\(storage.names)")
+
+    /* The same transaction re-offered on the next launch. */
+    transport.enqueueRaw(status: 503, body: "{}")
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("g"))
+    let d14 = await sk.diagnostics()
+    await check("*** SK14. a re-offered transaction does NOT queue twice ***",
+                d14.pending == 1, "pending=\(d14.pending)")
+
+    let reloaded = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
+    let d15 = await reloaded.diagnostics()
+    await check("SK15. …and it survives a relaunch", d15.pending == 1)
+}
+
+do {
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("h"))
+    storage.corrupt("storekit-evidence.v1.json")
+    let reloaded = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
+    let d16 = await reloaded.diagnostics()
+    await check("SK16. a corrupt evidence file never crashes the host app",
+                d16.recoveredFromCorruption && d16.pending == 0)
+}
+
+do {
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(
+            storage: storage, transport: transport, maxPending: 1))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("i"))
+    transport.enqueueRaw(status: 503, body: "{}")
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("j"))
+    /*
+     * ⚠ THE NEWEST IS REFUSED, NOT THE OLDEST EVICTED — the opposite of the
+     * event queue. Losing the newest is recoverable: the host app has not
+     * finished the transaction, so StoreKit re-offers it. Losing the oldest
+     * evidence is not.
+     */
+    let d17 = await sk.diagnostics()
+    await check("*** SK17. a full evidence queue refuses the NEWEST, never evicts the oldest ***",
+                d17.pending == 1 && d17.refusedForCapacity == 1)
+}
+
+do {
+    /* Withdrawal. */
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("k"))
+    await sk.setConsent(.disabled)
+    let d18 = await sk.diagnostics()
+    await check("SK18. withdrawing consent clears stored purchase evidence",
+                d18.pending == 0 && !storage.names.contains("storekit-evidence.v1.json"),
+                "\(storage.names)")
+}
+
+do {
+    /* An email address never leaves the device. */
+    let storage = FakeStoreKitStorage()
+    let transport = FakeStoreKitTransport()
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(
+            storage: storage, transport: transport, externalUserID: "person@example.com"))
+    await sk.submit(signedTransaction: StoreKitTestSupport.jws("l"))
+    let raw = String(decoding: transport.bodies.first ?? Data(), as: UTF8.self)
+    await check("*** SK19. an email address in external_user_id never reaches the network ***",
+                !raw.contains("@") && !raw.contains("person"), raw)
+
+    var threw = false
+    do { try await sk.identify(externalUserID: "person@example.com") } catch { threw = true }
+    await check("SK20. …and `identify` refuses it outright", threw)
+}
+
+do {
+    /* One listener, however many times start() is called. */
+    let sk = WebmasterIDStoreKit(
+        configuration: try StoreKitTestSupport.configuration(
+            storage: FakeStoreKitStorage(), transport: FakeStoreKitTransport()))
+    await sk.start()
+    await sk.start()
+    let d21 = await sk.diagnostics()
+    await check("SK21. start() is idempotent — never two Transaction.updates listeners",
+                d21.isListening)
+    await sk.stop()
+    let d22 = await sk.diagnostics()
+    await check("SK22. stop() releases the listener", !d22.isListening)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STOREKIT — WHAT THE SOURCES MUST NOT CONTAIN
+// ═══════════════════════════════════════════════════════════════════════════
+
+do {
+    /*
+     * ⚠ SOURCE-LEVEL ASSERTIONS, BECAUSE SOME GUARANTEES HAVE NO RUNTIME.
+     *
+     * "This SDK never finishes your transaction" cannot be proved by calling
+     * it — the absence of a call is not observable from outside. It is proved
+     * by reading the sources, with comments stripped first, because a comment
+     * that SAYS `finish()` is a mention and not a call. That distinction has
+     * bitten this project before.
+     */
+    func code(_ directory: String) -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent(directory)
+        guard let files = try? FileManager.default.contentsOfDirectory(atPath: root.path)
+        else { return "" }
+        var out = ""
+        for file in files where file.hasSuffix(".swift") {
+            guard let text = try? String(contentsOf: root.appendingPathComponent(file), encoding: .utf8)
+            else { continue }
+            var inBlock = false
+            for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
+                var l = String(line)
+                if inBlock {
+                    if let end = l.range(of: "*/") { l = String(l[end.upperBound...]); inBlock = false }
+                    else { continue }
+                }
+                if let start = l.range(of: "/*") { l = String(l[..<start.lowerBound]); inBlock = true }
+                if let line = l.range(of: "//") { l = String(l[..<line.lowerBound]) }
+                out += l + "\n"
+            }
+        }
+        return out
+    }
+
+    let storeKitCode = code("WebmasterIDStoreKit")
+    let coreCode = code("WebmasterID")
+
+    await check("SK23. the StoreKit sources were actually read",
+                storeKitCode.contains("public actor WebmasterIDStoreKit"))
+
+    await check("*** SK24. finish() is NEVER called — finishing is the host app's decision ***",
+                !storeKitCode.contains(".finish()") && !storeKitCode.contains("finish("),
+                "a call to finish() appeared in the StoreKit sources")
+
+    await check("*** SK25. the CORE target still imports no StoreKit ***",
+                !coreCode.contains("import StoreKit"),
+                "the core is no longer StoreKit-free")
+
+    await check("SK26. the client never branches on its own verification verdict",
+                !storeKitCode.contains("case .verified") && !storeKitCode.contains("case .unverified"),
+                "the SDK is filtering on a client-side verdict")
+
+    await check("SK27. no underscored SPI — sharing is `package`, which the compiler enforces",
+                !storeKitCode.contains("@_spi") && !coreCode.contains("@_spi"))
+}
 
 let (passed, failures) = await results.summary()
 print("\n  \(passed)/\(passed + failures.count) guarantees held")

@@ -99,9 +99,9 @@ public enum WebmasterIDConsent: String, Sendable, Codable, CaseIterable {
     case disabled
 
     /// Whether a persistent pseudonymous identifier may be created, stored or sent.
-    var permitsPersistentIdentifiers: Bool { self == .analyticsAllowed }
+    package var permitsPersistentIdentifiers: Bool { self == .analyticsAllowed }
     /// Whether an event may be created at all.
-    var permitsCollection: Bool { self != .disabled }
+    package var permitsCollection: Bool { self != .disabled }
 }
 
 /// What the SDK knows about consent, including "nobody has told us".
@@ -109,7 +109,7 @@ public enum WebmasterIDConsentState: Sendable, Equatable {
     case notDetermined
     case decided(WebmasterIDConsent)
 
-    var wire: WebmasterIDConsent? {
+    package var wire: WebmasterIDConsent? {
         if case let .decided(value) = self { return value }
         return nil
     }
@@ -118,8 +118,8 @@ public enum WebmasterIDConsentState: Sendable, Equatable {
     /// collected — not queued, not stored, not sent. The web tracker's own
     /// consent vocabulary is fail-OPEN, which is right for a cookieless page
     /// count and wrong for an app that had to ask.
-    var permitsCollection: Bool { wire?.permitsCollection ?? false }
-    var permitsPersistentIdentifiers: Bool { wire?.permitsPersistentIdentifiers ?? false }
+    package var permitsCollection: Bool { wire?.permitsCollection ?? false }
+    package var permitsPersistentIdentifiers: Bool { wire?.permitsPersistentIdentifiers ?? false }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
