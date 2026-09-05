@@ -397,8 +397,20 @@ jobs:
               || { echo "::error::NSPrivacyTracking is not false in $M"; exit 1; }
             grep -A1 "NSPrivacyTrackingDomains" "$M" | grep -q "<array/>" \
               || { echo "::error::a tracking domain was declared in $M"; exit 1; }
-            grep -qE "IDFA|advertisingIdentifier|identifierForVendor" "$M" \
-              && { echo "::error::an advertising identifier appears in $M"; exit 1; }
+            # ⚠ COMMENTS STRIPPED FIRST, AND THIS EXACT CHECK FAILED WITHOUT IT.
+            #
+            # The core's manifest EXPLAINS that its installation id "is NOT the
+            # advertising identifier and NOT identifierForVendor". A plain grep
+            # flagged that sentence — the one making the guarantee — as a
+            # violation of it. Same mention-versus-use confusion as the StoreKit
+            # import gate, in a check written in the same pass.
+            #
+            # Declarations live outside comments, so the comments go first.
+            if sed "/<!--/,/-->/d" "$M" \
+                 | grep -qE "IDFA|advertisingIdentifier|identifierForVendor"; then
+              echo "::error::an advertising identifier is DECLARED in $M"
+              exit 1
+            fi
           done
 
           # The split itself: Purchase History belongs to the StoreKit module
