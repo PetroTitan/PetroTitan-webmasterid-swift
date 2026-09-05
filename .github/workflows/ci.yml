@@ -522,10 +522,20 @@ jobs:
           # The path filter is also written without a `./` prefix: measured
           # here, `grep -rn ... .` emits `Sources/…`, not `./Sources/…`, so an
           # anchored `^\./` filter would silently exclude nothing.
+          # TWO places may import it, and only two:
+          #
+          #   Sources/WebmasterIDStoreKit/   the target that exists to.
+          #   Examples/StoreKitConsumer/     the example that shows a CUSTOMER
+          #                                  doing it. Consumer code, not SDK.
+          #
+          # ⚠ Examples/QuickStart/ IS DELIBERATELY NOT ON THIS LIST. It is the
+          # core-only consumer, and the proof that an analytics-only app never
+          # links StoreKit rests on it never importing it.
           if grep -rnE "^[[:space:]]*import[[:space:]]+StoreKit" . \
                --include="*.swift" \
                | grep -v "\.build/" \
-               | grep -v "Sources/WebmasterIDStoreKit/" ; then
+               | grep -v "Sources/WebmasterIDStoreKit/" \
+               | grep -v "Examples/StoreKitConsumer/" ; then
             echo "::error::StoreKit is imported outside the WebmasterIDStoreKit target"
             FAIL=1
           fi
