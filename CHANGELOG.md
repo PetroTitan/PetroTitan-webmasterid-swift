@@ -2,7 +2,53 @@
 
 ## Unreleased
 
-_Nothing yet._
+### Added
+
+- **`WebmasterIDStoreKit` — a new, OPTIONAL product.** Add it to a target only
+  if the app sells something. `WebmasterID` does not depend on it and does not
+  import StoreKit; the dependency runs one way.
+
+  ```swift
+  .product(name: "WebmasterIDStoreKit", package: "petrotitan-webmasterid-swift")
+  ```
+
+  It observes `Transaction.updates`, accepts an explicit
+  `VerificationResult<Transaction>` from `Product.purchase`, and submits Apple's
+  signed `jwsRepresentation` for server-side verification.
+
+- **A protected, separate evidence queue.** Unacknowledged signed transactions
+  are stored under `.completeFileProtection` on Apple's mobile platforms, in
+  their own file, with their own bounds. They are never mixed with the analytics
+  event queue — whose eviction policy would be free to discard a purchase to
+  make room for screen views.
+
+- **Identity association through Apple's signed `appAccountToken`.** Set
+  `externalUserID` and a purchase resolves to the SAME pseudonymous user as that
+  app's mobile events, so a paying customer's journey opens.
+
+### What this SDK will not do
+
+- **It never calls `transaction.finish()`.** Finishing is your decision: only
+  your app knows whether the entitlement was delivered. Call it yourself.
+- **It never tells the server what a purchase was worth.** The envelope has no
+  field for price, currency, product type, transaction id, environment or
+  verification status. Apple signs those; the server reads them from the
+  signature.
+- **It never filters on its own verification verdict.** `.verified` and
+  `.unverified` are both submitted, because a stale device trust store is not
+  evidence that a payment is fake.
+
+### Retention, stated plainly
+
+The raw JWS is written to disk on the device, in the protected queue, until the
+server acknowledges it — a queue that discarded the signature could not retry,
+and a purchase made offline would be lost. It is never persisted server-side.
+
+### Unchanged
+
+- The `WebmasterID` core: same public API, same behaviour, same privacy
+  manifest, still zero dependencies. An app that does not add the new product
+  sees no difference.
 
 ## 1.0.1 — 2026-09-04
 

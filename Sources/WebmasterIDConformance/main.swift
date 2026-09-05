@@ -737,6 +737,18 @@ do {
      * catches the forbidden keys someone remembered to list; this fails for ANY
      * key that appears and should not — including one nobody has thought of.
      */
+    /*
+     * ⚠ EMITTED FOR THE SERVER REPOSITORY TO CONSUME.
+     *
+     * The two repositories cannot import each other, so the only honest way to
+     * prove the wire contract agrees is to have the SDK print the bytes it
+     * actually sends and let the server's own suite parse THOSE. Set
+     * `WEBMASTERID_DUMP_ENVELOPE=1` and copy the line into the server fixture.
+     */
+    if ProcessInfo.processInfo.environment["WEBMASTERID_DUMP_ENVELOPE"] == "1" {
+        print("ENVELOPE " + String(decoding: transport.bodies[0], as: UTF8.self))
+    }
+
     let keys = Set(body.keys)
     await check("*** SK4. the envelope carries EXACTLY the six contract keys, and no other ***",
                 keys == [
@@ -744,6 +756,21 @@ do {
                     "client_transaction_id", "consent", "identity",
                 ],
                 "\(keys.sorted())")
+
+    /*
+     * ⚠ THE CROSS-REPOSITORY CONTRACT, PINNED IN BOTH DIRECTIONS.
+     *
+     * This fixture is byte-for-byte what the SDK emits, and the SAME file is
+     * committed in the private server repository, where the server's own
+     * parser is run against it. Neither repository can import the other, so
+     * without a shared artefact "the contract agrees" is an assertion nobody
+     * checks — and the first sign of a disagreement would be a 400 in
+     * production.
+     */
+    await check("SK4c. the emitted envelope matches the shared cross-repo fixture",
+                NSDictionary(dictionary: body)
+                    .isEqual(to: fixtureObject("storekit.submission.v2")),
+                String(decoding: transport.bodies[0], as: UTF8.self))
 
     let identityKeys = Set((body["identity"] as? [String: Any])?.keys ?? [:].keys)
     await check("*** SK4b. identity carries ONLY the user claim — no client copy of Apple's token ***",

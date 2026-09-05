@@ -1,0 +1,8 @@
+{
+  "contract_version": 2,
+  "app_property_id": "ap_0123456789abcdef",
+  "signed_transaction": "eyJhbGciOiJFUzI1NiJ9.eyJ0cmFuc2FjdGlvbklkIjoiXCh0YWcpIn0.asignature",
+  "client_transaction_id": "sk_clientEvent-1",
+  "consent": "analytics_allowed",
+  "identity": { "external_user_id": "acct-42" }
+}

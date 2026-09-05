@@ -316,3 +316,114 @@ the browser tracker are not in this repository and are not covered. No rights ar
 WebmasterID trademarks, branding, the hosted services or customer data.
 
 The licence covers this SDK's source only; WebmasterID's hosted services, branding and the rest of the platform are not included. See the [README](../README.md#licence).
+
+---
+
+## In-app purchases (`WebmasterIDStoreKit`)
+
+> **⚠ NOT IN A PUBLISHED RELEASE YET.** This product is on `main` and is planned
+> for 1.1.0, which has not been tagged. `from: "1.0.1"` will not resolve it.
+
+### Add the product
+
+```swift
+.target(
+    name: "MyApp",
+    dependencies: [
+        .product(name: "WebmasterID", package: "petrotitan-webmasterid-swift"),
+        .product(name: "WebmasterIDStoreKit", package: "petrotitan-webmasterid-swift"),
+    ]
+)
+```
+
+Add the second product **only if your app sells something.** `WebmasterID` does
+not depend on it and does not import StoreKit, so an app that adds only the core
+never links StoreKit and never has to account for it in App Store review.
+
+### Start it
+
+```swift
+let storeKit = WebmasterIDStoreKit(
+    configuration: try WebmasterIDStoreKitConfiguration(
+        appPropertyID: "ap_…",
+        consent: .decided(.analyticsAllowed),
+        externalUserID: currentUser?.accountKey
+    )
+)
+await storeKit.start()
+```
+
+`start()` opens **one** `Transaction.updates` listener and is safe to call
+twice — a second call is a no-op, not a crash and not a second listener.
+
+### Submit the purchase you just made
+
+```swift
+let result = try await product.purchase()
+if case let .success(verification) = result {
+    await storeKit.submit(verification)
+
+    // ⚠ YOU finish it. This SDK never will.
+    if case let .verified(transaction) = verification {
+        await grantEntitlement(for: transaction)
+        await transaction.finish()
+    }
+}
+```
+
+`Transaction.updates` does not deliver the transaction a direct `purchase()`
+call returns in the same session, so submitting explicitly is not redundant —
+without it that purchase is only seen on the next launch, and only if you have
+not finished it. Submitting through both paths is safe: the queue deduplicates
+on the signature.
+
+### What it does not do
+
+| | |
+| --- | --- |
+| `transaction.finish()` | **Never called.** Only your app knows whether the entitlement was delivered. |
+| Price, currency, product type | Never sent. Apple signs them; the server reads them from the signature. |
+| Its own verification verdict | Never used to filter. `.verified` and `.unverified` are both submitted, because the server decides against Apple's root certificates. |
+| Advertising identifiers | Never touched, in any target. |
+
+### Where the evidence lives
+
+Unacknowledged signed transactions are written to
+`<Application Support>/WebmasterID/<property>/storekit/`, under
+`.completeFileProtection` on iOS, tvOS, watchOS and visionOS. This file is
+separate from the analytics event queue and has its own bounds.
+
+**Stated plainly:** the raw JWS *is* on the device until the server
+acknowledges it. A queue that discarded the signature could not retry, and a
+purchase made offline would be lost. It is never persisted server-side.
+
+Because the file is under complete protection, it cannot be read before the
+device's first unlock. A background refresh that runs that early sends nothing
+and tries again later — nothing is lost, because you have not finished the
+transaction and StoreKit re-offers it.
+
+### Connecting a purchase to a user
+
+Set `externalUserID` to your own opaque account key — never an email address,
+which is refused outright rather than hashed. When your app also sets Apple's
+`appAccountToken` at purchase time, the purchase resolves to the **same**
+pseudonymous user as that app's mobile events, and the customer's journey opens.
+
+If you do not set `appAccountToken`, the payment is still recorded in full; it
+simply has no user attached, and the server says so with
+`missing_app_account_token`.
+
+### Reading the acknowledgement
+
+```swift
+let d = await storeKit.diagnostics()
+d.lastPaymentOutcome   // .accepted / .duplicate / .rejected
+d.lastIdentityOutcome  // .linked / .ambiguous / .retryable / …
+d.pending              // evidence still waiting
+```
+
+Payment and identity are reported **separately** because they fail
+independently: money is durable once Apple's signature verifies, while linking
+it to a user can stay unresolved afterwards. Evidence is kept whenever identity
+is `retryable`, even though the payment is already banked — dropping it there
+would strand that purchase unlinked forever.

@@ -16,6 +16,7 @@ express them.
 | Source on `main` | the current snapshot |
 | Recommended release | **`1.0.1`** |
 | Previous release | `1.0.0` — immutable, superseded |
+| In-app purchase support | on `main`, **not yet released** |
 
 > **`1.0.1` supersedes `1.0.0`, and the SDK code is identical between them.**
 > What differs is the release verification: 1.0.0's tag CI went red on a
@@ -25,6 +26,15 @@ express them.
 >
 > 1.0.0 remains published and was never moved. Its history, and why the red run
 > stands, are in [`CHANGELOG.md`](CHANGELOG.md).
+
+> **⚠ `WebmasterIDStoreKit` is on `main` and is NOT in any published release.**
+> It is planned for 1.1.0, which has not been tagged. `from: "1.0.1"` will not
+> resolve it — depending on it today means pinning a branch or a revision, which
+> is not something to do in a shipping app. This section will name a version
+> when one exists.
+>
+> The `WebmasterID` core is unchanged by that work: same public API, same
+> behaviour, and it still does not import StoreKit.
 
 ## Install
 

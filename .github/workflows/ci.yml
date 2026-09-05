@@ -191,6 +191,43 @@ jobs:
             exit 1
           fi
 
+      - name: Build WebmasterIDStoreKit for the iOS Simulator
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          # ⚠ THE STOREKIT TARGET IS NOT COVERED BY THE `WebmasterID` SCHEME.
+          #
+          # That scheme builds the core and its dependencies; `WebmasterIDStoreKit`
+          # depends on the core, not the other way round, so nothing above
+          # compiles it. Until this step existed the target was built only for
+          # macOS by `swift build`, and its `#if os(iOS)` branch had therefore
+          # never been compiled by anything, anywhere.
+          #
+          # StoreKit's own API surface also differs by platform, so a macOS
+          # build is not evidence about iOS.
+          if ! xcodebuild build \
+            -scheme WebmasterIDStoreKit \
+            -destination "${IOS_DESTINATION}" \
+            -derivedDataPath /tmp/dd-storekit \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            2>&1 | tee /tmp/ios-storekit.log; then
+            grep -E "error:|warning:" /tmp/ios-storekit.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::the StoreKit target failed to build for iOS"
+            exit 1
+          fi
+
+      - name: Confirm the protected-write branch was actually compiled for iOS
+        run: |
+          set -euo pipefail
+          # A scheme that silently excluded the target would otherwise pass as a
+          # green step. This asserts the file was in the build at all.
+          if ! grep -q "ProtectedStorage.swift" /tmp/ios-storekit.log; then
+            echo "::error::ProtectedStorage.swift was not compiled for iOS"
+            exit 1
+          fi
+
       # ── 6. an external consumer ──────────────────────────────────────────
       - name: Build the bundled example consumer for iOS
         working-directory: Examples/QuickStart
@@ -314,9 +351,43 @@ jobs:
           fi
 
           # ── capabilities this SDK must not have ───────────────────────
-          if grep -rnE "import[[:space:]]+StoreKit|ASIdentifierManager|ATTrackingManager|identifierForVendor" . \
+          #
+          # ⚠ THIS GATE WAS NARROWED IN M6.2, AND THE NARROWING IS THE POINT.
+          #
+          # It used to forbid `import StoreKit` ANYWHERE. That was right while
+          # the package had one target: the core must never pull StoreKit into
+          # an app that sells nothing. M6.2 adds `WebmasterIDStoreKit`, an
+          # OPTIONAL product that exists precisely to import it.
+          #
+          # Deleting the rule would have thrown away the guarantee along with
+          # the obstacle. So it is now scoped: StoreKit is forbidden in the CORE
+          # and permitted ONLY in the StoreKit target's own directory. An
+          # `import StoreKit` in Sources/WebmasterID/ still fails, which is the
+          # thing anyone actually cared about.
+          #
+          # The advertising identifiers stay forbidden EVERYWHERE, unchanged.
+          if grep -rnE "ASIdentifierManager|ATTrackingManager|identifierForVendor" . \
                --include="*.swift" | grep -v "^\./\.build/" ; then
-            echo "::error::a forbidden framework or identifier entered the SDK"
+            echo "::error::an advertising identifier entered the SDK"
+            FAIL=1
+          fi
+          # ⚠ ANCHORED TO THE STATEMENT, NOT THE PHRASE.
+          #
+          # The words "import StoreKit" also appear in a Package.swift comment
+          # and in a conformance assertion's string literal — both of which say
+          # the core must NOT do it. A phrase match flags the sentences that
+          # promise the guarantee, which is the mention-versus-use confusion
+          # this repository has tripped on before. `^[[:space:]]*import` matches
+          # only a real import statement.
+          #
+          # The path filter is also written without a `./` prefix: measured
+          # here, `grep -rn ... .` emits `Sources/…`, not `./Sources/…`, so an
+          # anchored `^\./` filter would silently exclude nothing.
+          if grep -rnE "^[[:space:]]*import[[:space:]]+StoreKit" . \
+               --include="*.swift" \
+               | grep -v "\.build/" \
+               | grep -v "Sources/WebmasterIDStoreKit/" ; then
+            echo "::error::StoreKit is imported outside the WebmasterIDStoreKit target"
             FAIL=1
           fi
 

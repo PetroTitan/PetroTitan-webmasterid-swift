@@ -68,12 +68,19 @@ public struct WebmasterIDStoreKitFileStorage: WebmasterIDStoreKitStorage {
          * `.atomic` for the same reason the event queue uses it: a crash
          * mid-write leaves the OLD file intact rather than half of a new one.
          *
-         * `.completeFileProtection` is compiled in only where it exists.
-         * ⚠ macOS HAS NO FILE PROTECTION — the option is a no-op there at best
-         * and an error at worst, and the SDK builds for macOS so its
-         * verification suite can run without a simulator. Guarding by platform
-         * keeps the mobile guarantee real instead of silently degrading it into
-         * "we asked and it did not happen".
+         * ⚠ THE PLATFORM GUARD IS NOT BECAUSE macOS REJECTS THE OPTION.
+         *
+         * Measured on macOS 26 with Swift 6.3.3: `.completeFileProtection` is
+         * accepted, the write succeeds, and `FileAttributeKey.protectionKey` is
+         * set afterwards. An earlier draft of this comment claimed macOS "has
+         * no file protection" and that the option might throw; both were wrong,
+         * and the check that disproved them took a minute.
+         *
+         * The guard stays for a narrower, honest reason: the guarantee this SDK
+         * makes is about Apple's MOBILE platforms, and macOS 12 — the oldest
+         * this package supports — is not testable here. Asking only where the
+         * behaviour is documented and verified keeps the promise exactly as
+         * wide as the evidence for it.
          */
         #if os(iOS) || os(tvOS) || os(watchOS) || os(visionOS)
             try data.write(to: url(name), options: [.atomic, .completeFileProtection])
