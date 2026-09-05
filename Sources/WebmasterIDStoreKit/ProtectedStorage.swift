@@ -96,3 +96,19 @@ public struct WebmasterIDStoreKitFileStorage: WebmasterIDStoreKitStorage {
         }
     }
 }
+
+/// The storage a collector holds before it is attached.
+///
+/// ⚠ IT REFUSES EVERY WRITE, AND THAT IS THE FAIL-CLOSED STATE.
+///
+/// A collector between `init` and `attach()` has not yet read the core's
+/// consent, so it must not be able to store a purchase. Using an optional queue
+/// instead would push a `?` through every call site and make "not attached
+/// yet" and "storage broken" look the same at each one. This makes the answer
+/// uniform: nothing is retained, and the enqueue outcome says so.
+struct WebmasterIDStoreKitUnattachedStorage: WebmasterIDStoreKitStorage {
+    struct NotAttached: Error {}
+    func read(_ name: String) throws -> Data? { nil }
+    func write(_ data: Data, to name: String) throws { throw NotAttached() }
+    func remove(_ name: String) throws {}
+}

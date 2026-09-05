@@ -343,15 +343,22 @@ never links StoreKit and never has to account for it in App Store review.
 ### Start it
 
 ```swift
-let storeKit = WebmasterIDStoreKit(
-    configuration: try WebmasterIDStoreKitConfiguration(
-        appPropertyID: "ap_…",
-        consent: .decided(.analyticsAllowed),
-        externalUserID: currentUser?.accountKey
-    )
+// ONE client owns consent and identity. The collector is built FROM it.
+let analytics = WebmasterIDClient(
+    configuration: try WebmasterIDConfiguration(appPropertyID: "ap_…")
 )
+let storeKit = try await WebmasterIDStoreKit.attached(to: analytics)
 await storeKit.start()
+
+// Consent and identity are set on the ANALYTICS client. StoreKit follows,
+// immediately — there is no second place to keep them in sync.
+await analytics.setConsent(.analyticsAllowed)
+try await analytics.identify(externalUserID: currentUser.accountKey)
 ```
+
+⚠ There is deliberately no `consent` or `externalUserID` on the StoreKit
+configuration. Two objects with independent opinions about who the user is will
+eventually disagree, and the purchase is the record that gets it wrong.
 
 `start()` opens **one** `Transaction.updates` listener and is safe to call
 twice — a second call is a no-op, not a crash and not a second listener.
@@ -371,6 +378,13 @@ if case let .success(verification) = result {
 }
 ```
 
+Only `.verified` results are queued and sent. An `.unverified` result means
+StoreKit itself could not vouch for the payload on this device; it is counted in
+diagnostics and nothing is transmitted. **That is not a substitute for server
+verification** — every submitted JWS is still verified against Apple's root
+certificates on the server. The local check narrows what is sent; it never
+decides what is trusted.
+
 `Transaction.updates` does not deliver the transaction a direct `purchase()`
 call returns in the same session, so submitting explicitly is not redundant —
 without it that purchase is only seen on the next launch, and only if you have
@@ -385,6 +399,17 @@ on the signature.
 | Price, currency, product type | Never sent. Apple signs them; the server reads them from the signature. |
 | Its own verification verdict | Never used to filter. `.verified` and `.unverified` are both submitted, because the server decides against Apple's root certificates. |
 | Advertising identifiers | Never touched, in any target. |
+| Your raw account key | **Never written to disk.** The queue stores an identity *epoch*; the raw value is resolved from the core client at delivery, and only if that identity is still current. |
+
+### Signing out, and switching accounts
+
+A purchase queued while User A was signed in is **never** delivered labelled as
+User B. `resetIdentity()` and a second `identify(...)` both advance the core's
+identity epoch, which permanently unlabels everything queued before it — the
+payment is still delivered, with no user attached.
+
+`setConsent(.disabled)` goes further: pending delivery is cancelled and the
+stored evidence is deleted before the call returns.
 
 ### Where the evidence lives
 

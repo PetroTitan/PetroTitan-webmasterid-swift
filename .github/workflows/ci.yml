@@ -85,21 +85,63 @@ jobs:
       - name: Validate the package manifest
         run: |
           set -euo pipefail
+          # ⚠ THIS STEP IS WHAT TURNED RUN 33989439761 RED, AND IT WAS RIGHT TO.
+          #
+          # It asserted `products == ["WebmasterID"]` while the branch adds a
+          # second product. The gate did its job: a manifest changed without the
+          # manifest contract being changed with it. Everything after it was
+          # SKIPPED, so that run proved nothing about iOS — a skipped step is not
+          # a green one.
+          #
+          # The fix is not to loosen the assertion. The product list is still
+          # EXACT — adding a third product still fails here — and the target
+          # graph is now asserted too, because "two products exist" says nothing
+          # about which one pulls in StoreKit.
           swift package dump-package > /tmp/dump.json
           python3 - <<'PY'
           import json
           pkg = json.load(open("/tmp/dump.json"))
           assert pkg["name"] == "WebmasterID", pkg["name"]
-          assert [p["name"] for p in pkg["products"]] == ["WebmasterID"], pkg["products"]
+
+          # ── products: exact, ordered, and no third ─────────────────────────
+          products = {p["name"]: p for p in pkg["products"]}
+          assert sorted(products) == ["WebmasterID", "WebmasterIDStoreKit"], sorted(products)
+          for name, product in products.items():
+              assert "library" in product["type"], (name, product["type"])
+              assert product["targets"] == [name], (name, product["targets"])
+
+          # ── no third-party dependencies, at package level ──────────────────
           assert pkg["dependencies"] == [], pkg["dependencies"]
+
+          # ── the target graph, which is the real guarantee ──────────────────
+          targets = {t["name"]: t for t in pkg["targets"]}
+          def deps(name):
+              return sorted(
+                  list(d.values())[0][0]
+                  for d in targets[name].get("dependencies", [])
+              )
+
+          # THE CORE MUST DEPEND ON NOTHING. An app that adds only WebmasterID
+          # must not link StoreKit, and the only way that stays true is if the
+          # core's dependency list is empty.
+          assert deps("WebmasterID") == [], deps("WebmasterID")
+          # And the arrow points one way.
+          assert deps("WebmasterIDStoreKit") == ["WebmasterID"], deps("WebmasterIDStoreKit")
+          assert "WebmasterIDStoreKit" not in deps("WebmasterID")
+
+          # ── platforms ──────────────────────────────────────────────────────
           ios = [p for p in pkg["platforms"] if p["platformName"] == "ios"]
           assert ios and ios[0]["version"] == "15.0", ios
-          for t in pkg["targets"]:
+
+          # ── Swift 6 everywhere, including the new target ───────────────────
+          for name, t in targets.items():
               modes = [s["kind"]["swiftLanguageMode"]["_0"]
                        for s in t.get("settings", [])
                        if "swiftLanguageMode" in s.get("kind", {})]
-              assert "6" in modes, (t["name"], modes)
-          print("manifest OK — one product, iOS 15, Swift 6 everywhere, no dependencies")
+              assert "6" in modes, (name, modes)
+
+          print("manifest OK — two products, one-way target graph, iOS 15, "
+                "Swift 6 everywhere, no dependencies")
           PY
 
       # ── 2/3/4. build, suite, strict concurrency ──────────────────────────
@@ -228,7 +270,7 @@ jobs:
             exit 1
           fi
 
-      # ── 6. an external consumer ──────────────────────────────────────────
+      # ── 6. two external consumers, and the difference between them ───────
       - name: Build the bundled example consumer for iOS
         working-directory: Examples/QuickStart
         run: |
@@ -264,6 +306,56 @@ jobs:
             exit 1
           fi
 
+      - name: Build the StoreKit example consumer for iOS
+        working-directory: Examples/StoreKitConsumer
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          # The other half of the pair. `QuickStart` takes only the core;
+          # this takes both products, so StoreKit IS in its build. Together
+          # they are the evidence that the split is real.
+          #
+          # See QuickStart's step for why SWIFT_SUPPRESS_WARNINGS=NO is needed.
+          if ! xcodebuild build \
+            -scheme StoreKitConsumer \
+            -destination "${IOS_DESTINATION}" \
+            -derivedDataPath /tmp/dd-consumer-sk \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_SUPPRESS_WARNINGS=NO \
+            SWIFT_TREAT_WARNINGS_AS_ERRORS=YES \
+            2>&1 | tee /tmp/consumer-storekit.log; then
+            grep -E "error:|warning:" /tmp/consumer-storekit.log | head -25 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::the StoreKit example consumer failed to build for iOS"
+            exit 1
+          fi
+
+      - name: An app that adds only WebmasterID must not link StoreKit
+        run: |
+          set -euo pipefail
+          # ⚠ THE GUARANTEE THE MANIFEST ALONE CANNOT GIVE.
+          #
+          # `dump-package` proves the core declares no StoreKit dependency.
+          # This proves the consequence: SwiftPM builds only the dependency
+          # closure, so a core-only consumer produces NO WebmasterIDStoreKit
+          # module — while the two-product consumer produces one.
+          #
+          # Asserted in BOTH directions on purpose. "0 in the core-only build"
+          # alone would also pass if the StoreKit target had silently stopped
+          # building at all.
+          CORE_ONLY=$(find /tmp/dd-consumer -name "WebmasterIDStoreKit.swiftmodule" | wc -l | tr -d " ")
+          BOTH=$(find /tmp/dd-consumer-sk -name "WebmasterIDStoreKit.swiftmodule" | wc -l | tr -d " ")
+          echo "::notice::core-only consumer StoreKit modules: ${CORE_ONLY}"
+          echo "::notice::two-product consumer StoreKit modules: ${BOTH}"
+          if [ "${CORE_ONLY}" != "0" ]; then
+            echo "::error::a core-only consumer built WebmasterIDStoreKit"
+            exit 1
+          fi
+          if [ "${BOTH}" -lt 1 ]; then
+            echo "::error::the two-product consumer did NOT build WebmasterIDStoreKit — the check above proves nothing"
+            exit 1
+          fi
+
       # ── 7. the privacy manifest ──────────────────────────────────────────
       - name: Confirm PrivacyInfo.xcprivacy is in the built product
         run: |
@@ -280,11 +372,46 @@ jobs:
           echo "$FOUND" | grep -qE "\.bundle/PrivacyInfo\.xcprivacy$" \
             || { echo "::error::the manifest is not at the bundle root"; exit 1; }
           plutil -lint "$(echo "$FOUND" | head -1)"
-          # And it must still say what it says.
-          grep -A1 "NSPrivacyTracking<" Sources/WebmasterID/PrivacyInfo.xcprivacy | grep -q "<false/>" \
-            || { echo "::error::NSPrivacyTracking is not false"; exit 1; }
-          grep -A1 "NSPrivacyTrackingDomains" Sources/WebmasterID/PrivacyInfo.xcprivacy | grep -q "<array/>" \
-            || { echo "::error::a tracking domain was declared"; exit 1; }
+
+          # ⚠ THE STOREKIT TARGET HAS ITS OWN MANIFEST AND MUST SHIP IT TOO.
+          #
+          # The previous branch shipped this module with none, inheriting the
+          # core's by accident of layout — which under-declared Purchase History
+          # for apps that sell, and would have over-declared it for apps that do
+          # not. Two products, two manifests, both required in their bundles.
+          SK_FOUND=$(find /tmp/dd-storekit -name "PrivacyInfo.xcprivacy" | head -5)
+          if [ -z "$SK_FOUND" ]; then
+            echo "::error::WebmasterIDStoreKit shipped no privacy manifest"
+            find /tmp/dd-storekit -name "*.bundle" | head -20
+            exit 1
+          fi
+          echo "$SK_FOUND"
+          echo "$SK_FOUND" | grep -qE "\.bundle/PrivacyInfo\.xcprivacy$" \
+            || { echo "::error::the StoreKit manifest is not at the bundle root"; exit 1; }
+          plutil -lint "$(echo "$SK_FOUND" | head -1)"
+
+          # And both must still say what they say.
+          for M in Sources/WebmasterID/PrivacyInfo.xcprivacy \
+                   Sources/WebmasterIDStoreKit/PrivacyInfo.xcprivacy; do
+            grep -A1 "NSPrivacyTracking<" "$M" | grep -q "<false/>" \
+              || { echo "::error::NSPrivacyTracking is not false in $M"; exit 1; }
+            grep -A1 "NSPrivacyTrackingDomains" "$M" | grep -q "<array/>" \
+              || { echo "::error::a tracking domain was declared in $M"; exit 1; }
+            grep -qE "IDFA|advertisingIdentifier|identifierForVendor" "$M" \
+              && { echo "::error::an advertising identifier appears in $M"; exit 1; }
+          done
+
+          # The split itself: Purchase History belongs to the StoreKit module
+          # and must NOT appear in the core, or every analytics-only consumer
+          # would declare that it collects purchase data.
+          grep -q "NSPrivacyCollectedDataTypePurchaseHistory" \
+            Sources/WebmasterIDStoreKit/PrivacyInfo.xcprivacy \
+            || { echo "::error::the StoreKit module does not declare Purchase History"; exit 1; }
+          if grep -q "NSPrivacyCollectedDataTypePurchaseHistory" \
+               Sources/WebmasterID/PrivacyInfo.xcprivacy; then
+            echo "::error::the CORE declares Purchase History — analytics-only apps would over-declare"
+            exit 1
+          fi
 
       # ── 8. secrets and production identifiers ────────────────────────────
       - name: Scan for secrets, PII and production identifiers

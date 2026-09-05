@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WebmasterIDStoreKit — Apple privacy manifest.
+
+  ═══════════════════════════════════════════════════════════════════════════
+  A SEPARATE MANIFEST, BECAUSE THIS PRODUCT IS SEPARATELY OPTIONAL
+  ═══════════════════════════════════════════════════════════════════════════
+
+  Purchase History belongs to THIS module and to no other. Adding it to the
+  core's manifest would make every app that uses WebmasterID for analytics
+  declare that it collects purchase data — including apps that sell nothing and
+  never link this product. The split in the package is mirrored here.
+
+  ⚠ THE PREVIOUS BRANCH SHIPPED THIS MODULE WITH NO MANIFEST AT ALL, inheriting
+  the core's by accident of layout. That was wrong in both directions: it
+  under-declared Purchase History and it would have over-declared for a
+  core-only consumer.
+
+  WHAT THIS MODULE SENDS OFF-DEVICE
+  ---------------------------------------------------------------------------
+  One JSON envelope per purchase: the Apple-signed JWS, the app property id, an
+  opaque client-minted submission id, the consent state, and — only under
+  `analyticsAllowed` — the account key the host application supplied. The
+  server decodes the JWS and stores what Apple signed: product, price, currency,
+  transaction identifiers.
+
+  WHAT IT DOES NOT SEND, AND WHY EACH IS ABSENT
+  ---------------------------------------------------------------------------
+  DEVICE ID — not declared. The envelope has no installation identifier, no
+  IDFV, no IDFA and no device field of any kind. The core declares Device ID
+  because its EVENT envelope carries an installation id; this one does not.
+
+  COARSE LOCATION — not declared, and this was checked against the receiving
+  route rather than assumed. The core declares it because the events pipeline
+  RETAINS an IP-derived country alongside the event. The StoreKit route resolves
+  a client network identity for RATE LIMITING ONLY; it is not passed to the
+  writer, and no App Store table has a country column. Nothing is retained, so
+  nothing is declared.
+
+  DIAGNOSTICS — not declared. The diagnostics this module exposes
+  (`WebmasterIDStoreKitDiagnostics`) are counts and closed enum values, they
+  stay on the device, and no code path transmits them. Apple's error text from a
+  failed local verification is counted and immediately discarded, never stored
+  and never sent.
+
+  OTHER USAGE DATA — not declared. There is no free-form field in the envelope.
+
+  PRODUCT INTERACTION — not declared HERE. A purchase is what Apple's
+  "Purchase History" category is for; declaring both would describe the same
+  bytes twice. The core declares Product Interaction for screen views and event
+  names, which this module does not send.
+
+  REQUIRED-REASON APIs — NSPrivacyAccessedAPITypes IS EMPTY, AND AUDITED BY NAME
+  ---------------------------------------------------------------------------
+  This module touches FileManager (url(for:in:appropriateFor:create:),
+  createDirectory, fileExists, removeItem), Data(contentsOf:), Data.write(to:
+  options:), JSONEncoder/JSONDecoder, URLRequest and URLSession via the injected
+  transport. None is on Apple's required-reason list.
+
+  ⚠ FILE TIMESTAMPS ARE THE ONE WORTH NAMING. The evidence queue enforces an AGE
+  bound, and the obvious implementation — reading the file's modification date —
+  would be a required-reason API (category C617.1). It is not used: the age is
+  measured from a `queuedAt` timestamp stored INSIDE each record. That was the
+  correct behaviour independently, because the file is rewritten on every append
+  and its mtime says when the queue last changed rather than how old the oldest
+  purchase in it is. The privacy consequence is a bonus, not the reason.
+
+  Also absent, each checked by name: UserDefaults, systemUptime,
+  mach_absolute_time, volumeAvailableCapacity, statfs, and active keyboards.
+
+  NSPrivacyTracking is false. No advertising identifier, no IDFV, no
+  AppTrackingTransparency, no data broker, no cross-app or cross-site linking,
+  and no tracking domains.
+-->
+<plist version="1.0">
+<dict>
+  <key>NSPrivacyTracking</key>
+  <false/>
+
+  <key>NSPrivacyTrackingDomains</key>
+  <array/>
+
+  <key>NSPrivacyAccessedAPITypes</key>
+  <array/>
+
+  <key>NSPrivacyCollectedDataTypes</key>
+  <array>
+    <!-- Apple's signed transaction: product, price, currency and the
+         transaction identifiers the server decodes from the signature. -->
+    <dict>
+      <key>NSPrivacyCollectedDataType</key>
+      <string>NSPrivacyCollectedDataTypePurchaseHistory</string>
+      <key>NSPrivacyCollectedDataTypeLinked</key>
+      <true/>
+      <key>NSPrivacyCollectedDataTypeTracking</key>
+      <false/>
+      <key>NSPrivacyCollectedDataTypePurposes</key>
+      <array>
+        <string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+      </array>
+    </dict>
+
+    <!-- The account key the host application passed to `identify`. Sent only
+         under `analyticsAllowed`, refused outright if it looks like an email
+         address, never written to this device's evidence queue, and hashed
+         server-side before storage. -->
+    <dict>
+      <key>NSPrivacyCollectedDataType</key>
+      <string>NSPrivacyCollectedDataTypeUserID</string>
+      <key>NSPrivacyCollectedDataTypeLinked</key>
+      <true/>
+      <key>NSPrivacyCollectedDataTypeTracking</key>
+      <false/>
+      <key>NSPrivacyCollectedDataTypePurposes</key>
+      <array>
+        <string>NSPrivacyCollectedDataTypePurposeAnalytics</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

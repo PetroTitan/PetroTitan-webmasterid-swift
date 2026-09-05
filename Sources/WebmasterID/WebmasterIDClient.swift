@@ -25,6 +25,9 @@ import Foundation
 /// There is no IDFA, no AppTrackingTransparency, no Location Services, no
 /// device fingerprinting and no UI swizzling — not disabled, absent.
 public actor WebmasterIDClient {
+    /// The one registered package extension, held WEAKLY — see ExtensionBridge.
+    weak var extensionObserver: (any WebmasterIDExtensionObserver)?
+
     private var configuration: WebmasterIDConfiguration
     private var queue: WebmasterIDEventQueue
     private var identity: WebmasterIDLocalIdentity
@@ -159,10 +162,16 @@ public actor WebmasterIDClient {
     }
 
     /// Change the consent state, applying every consequence immediately.
-    public func setConsent(_ consent: WebmasterIDConsent) {
+    public func setConsent(_ consent: WebmasterIDConsent) async {
         consentState = .decided(consent)
         applyConsentSideEffects(now: configuration.clock.now())
         persistIdentity()
+        /*
+         * ⚠ AWAITED BEFORE RETURNING. `.disabled` must mean every package
+         * extension has already dropped what it was holding — not that it will,
+         * shortly, on some other task.
+         */
+        await notifyExtensionObserver()
     }
 
     /// Attach an application-supplied account key.
@@ -171,7 +180,7 @@ public actor WebmasterIDClient {
     /// or whitespace — an email address is a direct identifier this product
     /// must never receive, and hashing it silently would hide the mistake from
     /// the developer who made it.
-    public func identify(externalUserID: String) throws {
+    public func identify(externalUserID: String) async throws {
         let validated = try WebmasterIDUserIDValidator.validate(externalUserID)
         guard consentState.permitsPersistentIdentifiers else { return }
         identity.identityEpoch += 1
@@ -179,6 +188,7 @@ public actor WebmasterIDClient {
             WebmasterIDStoredIdentity(externalUserID: validated, epoch: identity.identityEpoch)
         )
         persistIdentity()
+        await notifyExtensionObserver()
     }
 
     /// Log out: forget the account key and start a new pseudonymous identity.
@@ -187,7 +197,7 @@ public actor WebmasterIDClient {
     /// in resolve to no user id at send time. That loses an attribution the
     /// developer might have wanted, and it is the correct trade: the person has
     /// said they are done, and shipping their account key afterwards is not.
-    public func resetIdentity() {
+    public func resetIdentity() async {
         configuration.identityStore.clear()
         identity.identityEpoch += 1
         identity.installationID = consentState.permitsPersistentIdentifiers
@@ -196,6 +206,7 @@ public actor WebmasterIDClient {
         identity.sessionID = configuration.random.opaqueIdentifier(for: .session)
         identity.sessionLastActiveAt = configuration.clock.now()
         persistIdentity()
+        await notifyExtensionObserver()
     }
 
     /// Deliver everything queued, one batch at a time, until nothing is left
@@ -500,5 +511,66 @@ public actor WebmasterIDClient {
             if !ok { return false }
         }
         return true
+    }
+}
+
+extension WebmasterIDClient {
+    /// The current state, for an extension deciding what it may do right now.
+    /// The public property identifier, for a package extension addressing the
+    /// same property. Not a secret and not authentication — but `package`
+    /// anyway, because nothing outside this package has a reason to read it
+    /// back off the client.
+    package var packageAppPropertyID: String { configuration.appPropertyID }
+
+    package func extensionContext() -> WebmasterIDExtensionContext {
+        WebmasterIDExtensionContext(
+            consent: consentState,
+            identityEpoch: identity.identityEpoch
+        )
+    }
+
+    /// The account key that was current at `epoch`, or nil.
+    ///
+    /// ⚠ RETURNS NIL WHENEVER THE EPOCH HAS MOVED, AND THAT IS THE POINT.
+    ///
+    /// A purchase queued while User A was signed in must never be delivered
+    /// labelled as User B. Resolution happens at DELIVERY and is refused unless
+    /// the identity is the same one that was current when the item was queued —
+    /// so a sign-out, a reset or an account switch silently and permanently
+    /// unlabels everything queued before it, without discarding the item.
+    ///
+    /// It also returns nil when consent no longer permits a persistent
+    /// identifier, so a downgrade to `restricted` unlabels queued work too.
+    package func resolveExternalUserID(forEpoch epoch: Int?) -> String? {
+        guard let epoch else { return nil }
+        guard consentState.permitsPersistentIdentifiers else { return nil }
+        guard let stored = configuration.identityStore.load() else { return nil }
+        guard stored.epoch == epoch else { return nil }
+        return stored.externalUserID
+    }
+
+    /// Register the one extension that needs to hear about changes.
+    ///
+    /// The current state is delivered immediately, so an extension never has to
+    /// guess what it missed between construction and registration.
+    package func registerExtensionObserver(_ observer: any WebmasterIDExtensionObserver) async {
+        extensionObserver = observer
+        await observer.webmasterIDStateDidChange(extensionContext())
+    }
+
+    /// Push the current state to the registered extension, and WAIT for it.
+    ///
+    /// ⚠ AWAITED, NOT FIRED INTO A DETACHED TASK.
+    ///
+    /// `setConsent(.disabled)` has to mean the extension's stored evidence is
+    /// gone by the time the call returns. A `Task { }` would make that
+    /// eventually-true, which is indistinguishable from never-true in a test and
+    /// from a data-retention bug in production.
+    ///
+    /// The mutators became `async` for this. That is source-compatible: every
+    /// caller is outside the actor and already writes `await`.
+    func notifyExtensionObserver() async {
+        guard let observer = extensionObserver else { return }
+        await observer.webmasterIDStateDidChange(extensionContext())
     }
 }

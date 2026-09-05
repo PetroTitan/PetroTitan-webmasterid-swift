@@ -45,7 +45,7 @@ final class FakeStoreKitTransport: WebmasterIDTransport, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var bodies: [Data] = []
     private(set) var urls: [URL] = []
-    private var script: [(status: Int, body: Data)] = []
+    private var script: [(status: Int, body: Data, retryAfter: Double?)] = []
     private var failNext = 0
 
     func enqueue(status: Int = 200, payment: String = "accepted", identity: String? = nil) {
@@ -60,12 +60,12 @@ final class FakeStoreKitTransport: WebmasterIDTransport, @unchecked Sendable {
                 """
         }
         lock.lock(); defer { lock.unlock() }
-        script.append((status, Data(json.utf8)))
+        script.append((status, Data(json.utf8), nil))
     }
 
-    func enqueueRaw(status: Int, body: String) {
+    func enqueueRaw(status: Int, body: String, retryAfter: Double? = nil) {
         lock.lock(); defer { lock.unlock() }
-        script.append((status, Data(body.utf8)))
+        script.append((status, Data(body.utf8), retryAfter))
     }
 
     func failOnce() {
@@ -94,10 +94,13 @@ final class FakeStoreKitTransport: WebmasterIDTransport, @unchecked Sendable {
         }
         let fallback = (
             200,
-            Data(#"{"contract_version":1,"outcome":"accepted","client_transaction_id":null}"#.utf8)
+            Data(#"{"contract_version":1,"outcome":"accepted","client_transaction_id":null}"#.utf8),
+            Double?.none
         )
         let next = script.isEmpty ? fallback : script.removeFirst()
-        return .success(WebmasterIDHTTPResponse(status: next.0, body: next.1))
+        return .success(
+            WebmasterIDHTTPResponse(status: next.0, body: next.1, retryAfterSeconds: next.2)
+        )
     }
 
     func object(_ index: Int) -> [String: Any] {
@@ -115,28 +118,54 @@ final class FakeStoreKitTransport: WebmasterIDTransport, @unchecked Sendable {
 }
 
 enum StoreKitTestSupport {
-    /// A representative compact JWS. Structure only — nothing here is verified
-    /// on the client, and the conformance suite has no App Store to sign with.
+    /// A representative compact JWS. Structure only — nothing is verified on the
+    /// client, and this suite has no App Store to sign with.
     static func jws(_ tag: String) -> String {
-        "eyJhbGciOiJFUzI1NiJ9.eyJ0cmFuc2FjdGlvbklkIjoiXCh0YWcpIn0.\(tag)signature"
+        "eyJhbGciOiJFUzI1NiJ9.eyJ0eCI6IlwodGFnKSJ9.\(tag)signature"
     }
 
-    static func configuration(
+    /// A core client whose consent and identity the StoreKit collector obeys.
+    static func analytics(
+        storage: any WebmasterIDStorage = FakeStorage(),
+        identityStore: any WebmasterIDIdentityStore = WebmasterIDMemoryIdentityStore(),
+        transport: any WebmasterIDTransport = FakeTransport(),
+        clock: any WebmasterIDClock = FakeClock(),
+        random: any WebmasterIDRandomSource = FakeRandomSource()
+    ) throws -> WebmasterIDClient {
+        WebmasterIDClient(
+            configuration: try WebmasterIDConfiguration(
+                appPropertyID: "ap_0123456789abcdef",
+                transport: transport,
+                clock: clock,
+                random: random,
+                storage: storage,
+                identityStore: identityStore
+            )
+        )
+    }
+
+    static func collector(
+        analytics: WebmasterIDClient,
         storage: any WebmasterIDStoreKitStorage,
         transport: any WebmasterIDTransport,
-        consent: WebmasterIDConsentState = .decided(.analyticsAllowed),
-        externalUserID: String? = nil,
-        maxPending: Int = 128
-    ) throws -> WebmasterIDStoreKitConfiguration {
-        try WebmasterIDStoreKitConfiguration(
-            appPropertyID: "ap_0123456789abcdef",
-            consent: consent,
-            externalUserID: externalUserID,
-            maxPendingSubmissions: maxPending,
-            transport: transport,
-            clock: FakeClock(),
-            random: FakeRandomSource(),
-            storage: storage
+        clock: any WebmasterIDClock = FakeClock(),
+        maxPending: Int = 128,
+        maxBytes: Int = 512 * 1024,
+        maxAge: TimeInterval = 30 * 24 * 60 * 60,
+        maxAttempts: Int = 12
+    ) async throws -> WebmasterIDStoreKit {
+        try await WebmasterIDStoreKit.attached(
+            to: analytics,
+            configuration: WebmasterIDStoreKitConfiguration(
+                maxPendingSubmissions: maxPending,
+                maxQueuedBytes: maxBytes,
+                maxEvidenceAge: maxAge,
+                maxDeliveryAttempts: maxAttempts,
+                transport: transport,
+                storage: storage
+            ),
+            clock: clock,
+            random: FakeRandomSource()
         )
     }
 }

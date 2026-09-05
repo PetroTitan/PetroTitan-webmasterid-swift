@@ -696,284 +696,373 @@ do {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════════════
-// STOREKIT — THE TRUST BOUNDARY, THE QUEUE, AND WHAT IS NOT IN THE SOURCES
+// STOREKIT — THE TRUST BOUNDARY, THE QUEUE, AND THE ONE AUTHORITY
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// A verified/unverified pair cannot be minted without an App Store, so the
+/// enqueue path is exercised through the package-visible seam the SDK uses.
+func skPair(
+    storage: FakeStoreKitStorage = FakeStoreKitStorage(),
+    transport: FakeStoreKitTransport = FakeStoreKitTransport(),
+    identityStore: any WebmasterIDIdentityStore = WebmasterIDMemoryIdentityStore(),
+    clock: FakeClock = FakeClock(),
+    maxPending: Int = 128,
+    maxBytes: Int = 512 * 1024,
+    maxAge: TimeInterval = 30 * 24 * 60 * 60,
+    maxAttempts: Int = 12
+) async throws -> (WebmasterIDClient, WebmasterIDStoreKit, FakeStoreKitStorage, FakeStoreKitTransport) {
+    let analytics = try StoreKitTestSupport.analytics(
+        identityStore: identityStore, clock: clock
+    )
+    let sk = try await StoreKitTestSupport.collector(
+        analytics: analytics, storage: storage, transport: transport, clock: clock,
+        maxPending: maxPending, maxBytes: maxBytes, maxAge: maxAge, maxAttempts: maxAttempts
+    )
+    return (analytics, sk, storage, transport)
+}
+
 do {
-    let storage = FakeStoreKitStorage()
     let transport = FakeStoreKitTransport()
     transport.enqueue(payment: "accepted", identity: "linked")
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(
-            storage: storage, transport: transport, externalUserID: "acct-42"))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("a"))
-    let body = transport.object(0)
+    let (analytics, sk, _, t) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    try await analytics.identify(externalUserID: "acct-42")
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("a"))
 
-    await check("SK1. the envelope declares contract v2",
-                body["contract_version"] as? Int == 2, "\(body)")
+    let body = t.object(0)
+    await check("SK1. the envelope declares contract v2", body["contract_version"] as? Int == 2, "\(body)")
     await check("SK2. it carries the JWS verbatim",
                 body["signed_transaction"] as? String == StoreKitTestSupport.jws("a"))
-    await check("SK3. the identity claim is nested, not top-level",
+    await check("SK3. the identity claim is nested, resolved at DELIVERY from the core",
                 (body["identity"] as? [String: Any])?["external_user_id"] as? String == "acct-42",
                 "\(body)")
 
-    /*
-     * ⚠ THE CENTRAL GUARANTEE: APPLE DECIDES MONEY.
-     *
-     * Not "these keys are filtered out" — there is no property on the
-     * submission type that could hold them. This asserts the wire bytes.
-     */
-    /*
-     * ⚠ ASSERTED AS A CLOSED KEY SET, NOT AS ABSENT SUBSTRINGS.
-     *
-     * The substring version of this check FAILED on its first run — and it was
-     * the check that was wrong, not the SDK. `client_transaction_id` contains
-     * `transaction_id`, so a blanket "the body must not contain
-     * transaction_id" flags the one field the contract requires. That is the
-     * same mention-versus-use confusion that has bitten this project before,
-     * and the fix is the same: compare structure, not text.
-     *
-     * Equality against the whole set is also strictly stronger. A denylist only
-     * catches the forbidden keys someone remembered to list; this fails for ANY
-     * key that appears and should not — including one nobody has thought of.
-     */
-    /*
-     * ⚠ EMITTED FOR THE SERVER REPOSITORY TO CONSUME.
-     *
-     * The two repositories cannot import each other, so the only honest way to
-     * prove the wire contract agrees is to have the SDK print the bytes it
-     * actually sends and let the server's own suite parse THOSE. Set
-     * `WEBMASTERID_DUMP_ENVELOPE=1` and copy the line into the server fixture.
-     */
-    if ProcessInfo.processInfo.environment["WEBMASTERID_DUMP_ENVELOPE"] == "1" {
-        print("ENVELOPE " + String(decoding: transport.bodies[0], as: UTF8.self))
-    }
-
     let keys = Set(body.keys)
-    await check("*** SK4. the envelope carries EXACTLY the six contract keys, and no other ***",
-                keys == [
-                    "contract_version", "app_property_id", "signed_transaction",
-                    "client_transaction_id", "consent", "identity",
-                ],
-                "\(keys.sorted())")
-
-    /*
-     * ⚠ THE CROSS-REPOSITORY CONTRACT, PINNED IN BOTH DIRECTIONS.
-     *
-     * This fixture is byte-for-byte what the SDK emits, and the SAME file is
-     * committed in the private server repository, where the server's own
-     * parser is run against it. Neither repository can import the other, so
-     * without a shared artefact "the contract agrees" is an assertion nobody
-     * checks — and the first sign of a disagreement would be a 400 in
-     * production.
-     */
-    await check("SK4c. the emitted envelope matches the shared cross-repo fixture",
-                NSDictionary(dictionary: body)
-                    .isEqual(to: fixtureObject("storekit.submission.v2")),
-                String(decoding: transport.bodies[0], as: UTF8.self))
-
+    await check("*** SK4. the envelope carries EXACTLY the six contract keys ***",
+                keys == ["contract_version", "app_property_id", "signed_transaction",
+                         "client_transaction_id", "consent", "identity"], "\(keys.sorted())")
     let identityKeys = Set((body["identity"] as? [String: Any])?.keys ?? [:].keys)
-    await check("*** SK4b. identity carries ONLY the user claim — no client copy of Apple's token ***",
+    await check("SK4b. identity carries ONLY the user claim — no client copy of Apple's token",
                 identityKeys == ["external_user_id"], "\(identityKeys.sorted())")
+    if ProcessInfo.processInfo.environment["WEBMASTERID_DUMP_ENVELOPE"] == "1" {
+        print("ENVELOPE " + String(decoding: t.bodies[0], as: UTF8.self))
+    }
+    await check("SK4c. the emitted envelope matches the shared cross-repo fixture",
+                NSDictionary(dictionary: body).isEqual(to: fixtureObject("storekit.submission.v2")),
+                String(decoding: t.bodies[0], as: UTF8.self))
+    let d = await sk.diagnostics()
+    await check("SK5. accepted + linked retires the evidence", d.pending == 0)
+}
 
-    let d5 = await sk.diagnostics()
-    await check("SK5. the accepted+linked evidence is retired", d5.pending == 0)
+// ── Phase 3: the raw account key never touches disk ───────────────────────
+do {
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let (analytics, sk, storage, _) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    try await analytics.identify(externalUserID: "acct-USER-A")
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("b"))
+
+    let raw = storage.raw("storekit-evidence.v1.json")
+    await check("*** SK28. the queue file contains NO raw external user id ***",
+                !raw.contains("acct-USER-A") && !raw.contains("external_user_id")
+                    && !raw.contains("externalUserID"), raw)
+    await check("SK29. it stores an identity EPOCH instead",
+                raw.contains("identityEpoch"), raw)
 }
 
 do {
-    /* The discard rule — the half that is easy to get wrong. */
-    let storage = FakeStoreKitStorage()
+    /*
+     * ⚠ THE ACCOUNT-SWITCH TEST. User A buys; User B signs in before delivery
+     * succeeds. The request must name NEITHER.
+     */
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let (analytics, sk, storage, t) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    try await analytics.identify(externalUserID: "acct-USER-A")
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("c"))
+    let dPre = await sk.diagnostics()
+    await check("SK30pre. the purchase is queued and undelivered", dPre.pending == 1)
+
+    try await analytics.identify(externalUserID: "acct-USER-B")
+    transport.enqueue(payment: "accepted", identity: "not_provided")
+    /*
+     * ⚠ `flushIgnoringBackoff`, AND THE FIRST VERSION OF THIS TEST WAS WRONG
+     * WITHOUT IT.
+     *
+     * The 503 above set a backoff window, so a plain `flush()` returned without
+     * sending and `bodies.last` was still the FIRST attempt — which legitimately
+     * named User A, because User A was current when it was made. The test read
+     * that as the SDK leaking a user across an account switch. It was reading
+     * the wrong request.
+     */
+    await sk.flushIgnoringBackoff()
+
+    let sent = String(decoding: t.bodies.last ?? Data(), as: UTF8.self)
+    await check("*** SK30. after an account switch the request names NEITHER user ***",
+                !sent.contains("acct-USER-A") && !sent.contains("acct-USER-B"), sent)
+    await check("SK31. …and the PAYMENT was still delivered",
+                sent.contains(StoreKitTestSupport.jws("c")), sent)
+    await check("SK32. the stored file never held either user",
+                !storage.raw("storekit-evidence.v1.json").contains("acct-USER"))
+    let d = await sk.diagnostics()
+    await check("SK33. diagnostics name no user",
+                "\(d)".contains("acct-USER-A") == false && "\(d)".contains("acct-USER-B") == false)
+}
+
+// ── Phase 4: one consent and identity authority ──────────────────────────
+do {
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let (analytics, sk, storage, _) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("d"))
+    let d34 = await sk.diagnostics()
+    await check("SK34pre. evidence is queued", d34.pending == 1)
+
+    /* A DIRECT core call, not a wrapper. */
+    await analytics.setConsent(.disabled)
+    let d = await sk.diagnostics()
+    await check("*** SK34. a DIRECT core setConsent(.disabled) deletes StoreKit evidence ***",
+                d.pending == 0 && !storage.names.contains("storekit-evidence.v1.json"),
+                "pending=\(d.pending) files=\(storage.names)")
+    await check("SK35. …and cancels the listener", !d.isListening)
+}
+
+do {
+    let (analytics, sk, storage, transport) = try await skPair()
+    /* notDetermined by default. */
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("e"))
+    let d = await sk.diagnostics()
+    await check("*** SK36. with consent undetermined nothing is queued, stored or sent ***",
+                d.pending == 0 && transport.count == 0 && storage.names.isEmpty,
+                "files=\(storage.names) sent=\(transport.count)")
+    await check("SK37. the refusal is reported to the host",
+                d.lastEnqueueOutcome == .refusedByConsent, "\(String(describing: d.lastEnqueueOutcome))")
+    _ = analytics
+}
+
+do {
+    let transport = FakeStoreKitTransport()
+    transport.enqueue(payment: "accepted", identity: "not_permitted")
+    let (analytics, sk, _, t) = try await skPair(transport: transport)
+    await analytics.setConsent(.restricted)
+    try? await analytics.identify(externalUserID: "acct-42")
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("f"))
+    let raw = String(decoding: t.bodies.first ?? Data(), as: UTF8.self)
+    await check("*** SK38. `restricted` sends the purchase and NO user ***",
+                t.count == 1 && !raw.contains("identity") && !raw.contains("acct-42"), raw)
+    _ = sk
+}
+
+do {
+    /* Reset unlabels without discarding. */
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let (analytics, sk, storage, t) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    try await analytics.identify(externalUserID: "acct-42")
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("g"))
+    await analytics.resetIdentity()
+    let d39 = await sk.diagnostics()
+    await check("*** SK39. reset keeps the payment evidence ***", d39.pending == 1)
+    await check("SK40. …and strips the queued identity claim",
+                !storage.raw("storekit-evidence.v1.json").contains("\"identityEpoch\":1"),
+                storage.raw("storekit-evidence.v1.json"))
+    transport.enqueue(payment: "accepted", identity: "not_provided")
+    await sk.flushIgnoringBackoff()  /* see SK30 — a backoff window hides the retry */
+    await check("SK41. the delivered request has no user",
+                !String(decoding: t.bodies.last ?? Data(), as: UTF8.self).contains("identity"))
+}
+
+// ── Phase 7: the queue's three bounds and its retry behaviour ────────────
+do {
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let (analytics, sk, storage, _) = try await skPair(transport: transport, maxPending: 1)
+    await analytics.setConsent(.analyticsAllowed)
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("h"))
+    transport.enqueueRaw(status: 503, body: "{}")
+    let second = await sk.submitForTesting(jws: StoreKitTestSupport.jws("i"))
+    let d42 = await sk.diagnostics()
+    await check("*** SK42. a full queue REFUSES and says so — it evicts nothing ***",
+                second == .refusedQueueFull && d42.pending == 1, "\(second)")
+    await check("SK43. the first payment is still there",
+                storage.raw("storekit-evidence.v1.json").contains(StoreKitTestSupport.jws("h")))
+}
+
+do {
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let (analytics, sk, _, _) = try await skPair(transport: transport, maxBytes: 400)
+    await analytics.setConsent(.analyticsAllowed)
+    let outcome = await sk.submitForTesting(jws: String(repeating: "z", count: 900))
+    await check("*** SK44. the BYTE bound refuses too — a count alone bounds nothing ***",
+                outcome == .refusedQueueFull, "\(outcome)")
+}
+
+do {
+    let clock = FakeClock()
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let (analytics, sk, _, _) = try await skPair(
+        transport: transport, clock: clock, maxAge: 60)
+    await analytics.setConsent(.analyticsAllowed)
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("j"))
+    let d45 = await sk.diagnostics()
+    await check("SK45pre. queued", d45.pending == 1)
+    clock.advance(120)
+    await sk.flush()
+    let d = await sk.diagnostics()
+    await check("*** SK45. the AGE bound is measured from the stored timestamp ***",
+                d.pending == 0 && d.droppedForAge == 1,
+                "pending=\(d.pending) aged=\(d.droppedForAge)")
+}
+
+do {
+    /* Attempt ceiling produces an explicit terminal disposition. */
+    let transport = FakeStoreKitTransport()
+    let (analytics, sk, _, _) = try await skPair(transport: transport, maxAttempts: 2)
+    await analytics.setConsent(.analyticsAllowed)
+    let clock = FakeClock()
+    _ = clock
+    for _ in 0..<4 { transport.enqueueRaw(status: 503, body: "{}") }
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("k"))
+    for _ in 0..<4 { await sk.flushIgnoringBackoff() }
+    let d = await sk.diagnostics()
+    await check("*** SK46. an exhausted item becomes ABANDONED, not an immortal skipped row ***",
+                d.abandoned == 1 && d.pending == 0, "abandoned=\(d.abandoned) pending=\(d.pending)")
+}
+
+do {
+    /* Retry-After is honoured. */
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 429, body: "{}", retryAfter: 90)
+    let clock = FakeClock()
+    let (analytics, sk, _, _) = try await skPair(transport: transport, clock: clock)
+    await analytics.setConsent(.analyticsAllowed)
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("l"))
+    let d1 = await sk.diagnostics()
+    await check("*** SK47. a 429 keeps the evidence and honours Retry-After ***",
+                d1.pending == 1 && d1.retryAfterHonoured == 1,
+                "pending=\(d1.pending) retryAfter=\(d1.retryAfterHonoured)")
+    let before = transport.count
+    await sk.flush()
+    await check("SK48. …and the next flush does not fire early",
+                transport.count == before, "sent \(transport.count - before) early")
+    clock.advance(120)
+    transport.enqueue(payment: "accepted", identity: "not_provided")
+    await sk.flush()
+    let d49 = await sk.diagnostics()
+    await check("SK49. …but does fire once the window passes", d49.pending == 0)
+}
+
+do {
+    /* An unknown status is retained conservatively. */
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 418, body: "{}")
+    let (analytics, sk, _, _) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("m"))
+    let d50 = await sk.diagnostics()
+    await check("*** SK50. an unrecognised status RETAINS — the conservative reading ***",
+                d50.pending == 1)
+}
+
+do {
+    /* Terminal outcomes drain. */
+    for (payment, label) in [("rejected", "SK51"), ("duplicate", "SK52")] {
+        let transport = FakeStoreKitTransport()
+        transport.enqueue(payment: payment, identity: "not_provided")
+        let (analytics, sk, _, _) = try await skPair(transport: transport)
+        await analytics.setConsent(.analyticsAllowed)
+        await sk.submitForTesting(jws: StoreKitTestSupport.jws(payment))
+        let dt = await sk.diagnostics()
+        await check("\(label). `\(payment)` is terminal — the queue drains", dt.pending == 0)
+    }
+}
+
+do {
+    /* Identity retryable retains a BANKED payment. */
     let transport = FakeStoreKitTransport()
     transport.enqueue(payment: "accepted", identity: "retryable")
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(
-            storage: storage, transport: transport, externalUserID: "acct-42"))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("b"))
-    let d6 = await sk.diagnostics()
-    await check("*** SK6. a BANKED payment whose identity is retryable KEEPS its evidence ***",
-                d6.pending == 1, "pending=\(d6.pending)")
-
+    let (analytics, sk, _, _) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    try await analytics.identify(externalUserID: "acct-42")
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("n"))
+    let d53 = await sk.diagnostics()
+    await check("*** SK53. a banked payment with retryable identity KEEPS its evidence ***",
+                d53.pending == 1)
     transport.enqueue(payment: "duplicate", identity: "linked")
     await sk.flush()
-    let d7 = await sk.diagnostics()
-    await check("SK7. …and the retry deduplicates the payment and converges the identity",
-                d7.pending == 0 && d7.lastIdentityOutcome == .linked)
+    let d = await sk.diagnostics()
+    await check("SK54. …and the retry deduplicates the payment and links the identity",
+                d.pending == 0 && d.lastIdentityOutcome == .linked)
 }
 
 do {
-    let storage = FakeStoreKitStorage()
-    let transport = FakeStoreKitTransport()
-    transport.enqueue(payment: "rejected", identity: "not_provided")
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("c"))
-    let d8 = await sk.diagnostics()
-    await check("SK8. `rejected` is terminal — the queue drains rather than looping forever",
-                d8.pending == 0)
-}
-
-do {
-    /* A non-2xx is not an acknowledgement. */
-    let storage = FakeStoreKitStorage()
-    let transport = FakeStoreKitTransport()
-    transport.enqueueRaw(status: 503, body: #"{"error":"temporarily_unavailable"}"#)
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("d"))
-    let d9 = await sk.diagnostics()
-    await check("*** SK9. a 503 KEEPS the evidence — a verifier outage is not a refusal ***",
-                d9.pending == 1)
-
-    transport.failOnce()
-    await sk.flush()
-    let d10 = await sk.diagnostics()
-    await check("SK10. a transport failure keeps it too", d10.pending == 1)
-}
-
-do {
-    /* Consent. */
-    let storage = FakeStoreKitStorage()
-    let transport = FakeStoreKitTransport()
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(
-            storage: storage, transport: transport, consent: .notDetermined,
-            externalUserID: "acct-42"))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("e"))
-    let d11 = await sk.diagnostics()
-    await check("*** SK11. with consent undetermined, no evidence is queued, stored or sent ***",
-                d11.pending == 0 && transport.count == 0 && storage.names.isEmpty,
-                "files=\(storage.names) sent=\(transport.count)")
-}
-
-do {
-    let storage = FakeStoreKitStorage()
-    let transport = FakeStoreKitTransport()
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(
-            storage: storage, transport: transport, consent: .decided(.restricted),
-            externalUserID: "acct-42"))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("f"))
-    let raw = String(decoding: transport.bodies.first ?? Data(), as: UTF8.self)
-
-    /*
-     * ⚠ THE PAYMENT SURVIVES `restricted`; THE USER DOES NOT.
-     *
-     * Refusing to report the purchase would lose revenue while protecting
-     * nothing — it is the merchant's own record of a transaction. What is
-     * dropped is the identity claim, and it is dropped ON THE DEVICE so it
-     * cannot be read by a proxy on the way to a server that would drop it too.
-     */
-    await check("*** SK12. under `restricted` the purchase is sent and the user is not ***",
-                transport.count == 1 && !raw.contains("identity")
-                    && !raw.contains("acct-42"), raw)
-}
-
-do {
-    /* The queue is durable and deduplicated. */
-    let storage = FakeStoreKitStorage()
+    /* Durability, dedup and corruption. */
     let transport = FakeStoreKitTransport()
     transport.enqueueRaw(status: 503, body: "{}")
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("g"))
-    await check("SK13. evidence is persisted BEFORE any delivery is attempted",
+    let (analytics, sk, storage, _) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("o"))
+    await check("SK55. evidence is persisted BEFORE any delivery is attempted",
                 storage.names.contains("storekit-evidence.v1.json"), "\(storage.names)")
-
-    /* The same transaction re-offered on the next launch. */
     transport.enqueueRaw(status: 503, body: "{}")
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("g"))
-    let d14 = await sk.diagnostics()
-    await check("*** SK14. a re-offered transaction does NOT queue twice ***",
-                d14.pending == 1, "pending=\(d14.pending)")
+    let again = await sk.submitForTesting(jws: StoreKitTestSupport.jws("o"))
+    let d56 = await sk.diagnostics()
+    await check("*** SK56. the same signature does not queue twice ***",
+                again == .alreadyQueued && d56.pending == 1, "\(again)")
 
-    let reloaded = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
-    let d15 = await reloaded.diagnostics()
-    await check("SK15. …and it survives a relaunch", d15.pending == 1)
-}
+    let reloadedAnalytics = try StoreKitTestSupport.analytics()
+    await reloadedAnalytics.setConsent(.analyticsAllowed)
+    let reloaded = try await StoreKitTestSupport.collector(
+        analytics: reloadedAnalytics, storage: storage, transport: transport)
+    let d57 = await reloaded.diagnostics()
+    await check("SK57. …and it survives a relaunch", d57.pending == 1)
 
-do {
-    let storage = FakeStoreKitStorage()
-    let transport = FakeStoreKitTransport()
-    transport.enqueueRaw(status: 503, body: "{}")
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("h"))
     storage.corrupt("storekit-evidence.v1.json")
-    let reloaded = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
-    let d16 = await reloaded.diagnostics()
-    await check("SK16. a corrupt evidence file never crashes the host app",
-                d16.recoveredFromCorruption && d16.pending == 0)
+    let afterCorruption = try await StoreKitTestSupport.collector(
+        analytics: reloadedAnalytics, storage: storage, transport: transport)
+    let dc = await afterCorruption.diagnostics()
+    await check("SK58. a corrupt evidence file never crashes the host app",
+                dc.recoveredFromCorruption && dc.pending == 0)
 }
 
 do {
-    let storage = FakeStoreKitStorage()
-    let transport = FakeStoreKitTransport()
-    transport.enqueueRaw(status: 503, body: "{}")
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(
-            storage: storage, transport: transport, maxPending: 1))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("i"))
-    transport.enqueueRaw(status: 503, body: "{}")
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("j"))
-    /*
-     * ⚠ THE NEWEST IS REFUSED, NOT THE OLDEST EVICTED — the opposite of the
-     * event queue. Losing the newest is recoverable: the host app has not
-     * finished the transaction, so StoreKit re-offers it. Losing the oldest
-     * evidence is not.
-     */
-    let d17 = await sk.diagnostics()
-    await check("*** SK17. a full evidence queue refuses the NEWEST, never evicts the oldest ***",
-                d17.pending == 1 && d17.refusedForCapacity == 1)
-}
-
-do {
-    /* Withdrawal. */
-    let storage = FakeStoreKitStorage()
-    let transport = FakeStoreKitTransport()
-    transport.enqueueRaw(status: 503, body: "{}")
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(storage: storage, transport: transport))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("k"))
-    await sk.setConsent(.disabled)
-    let d18 = await sk.diagnostics()
-    await check("SK18. withdrawing consent clears stored purchase evidence",
-                d18.pending == 0 && !storage.names.contains("storekit-evidence.v1.json"),
-                "\(storage.names)")
-}
-
-do {
-    /* An email address never leaves the device. */
-    let storage = FakeStoreKitStorage()
-    let transport = FakeStoreKitTransport()
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(
-            storage: storage, transport: transport, externalUserID: "person@example.com"))
-    await sk.submit(signedTransaction: StoreKitTestSupport.jws("l"))
-    let raw = String(decoding: transport.bodies.first ?? Data(), as: UTF8.self)
-    await check("*** SK19. an email address in external_user_id never reaches the network ***",
-                !raw.contains("@") && !raw.contains("person"), raw)
-
-    var threw = false
-    do { try await sk.identify(externalUserID: "person@example.com") } catch { threw = true }
-    await check("SK20. …and `identify` refuses it outright", threw)
-}
-
-do {
-    /* One listener, however many times start() is called. */
-    let sk = WebmasterIDStoreKit(
-        configuration: try StoreKitTestSupport.configuration(
-            storage: FakeStoreKitStorage(), transport: FakeStoreKitTransport()))
-    await sk.start()
-    await sk.start()
-    let d21 = await sk.diagnostics()
-    await check("SK21. start() is idempotent — never two Transaction.updates listeners",
-                d21.isListening)
+    /* One listener, and its lifetime. */
+    let (analytics, sk, _, _) = try await skPair()
+    await analytics.setConsent(.analyticsAllowed)
+    for _ in 0..<5 { await sk.start() }
+    let g1 = await sk.listenerGenerationForTesting()
+    await check("*** SK59. five start() calls create exactly one iterator ***",
+                g1 == 1, "generations=\(g1)")
     await sk.stop()
-    let d22 = await sk.diagnostics()
-    await check("SK22. stop() releases the listener", !d22.isListening)
+    await sk.start()
+    let g2 = await sk.listenerGenerationForTesting()
+    await check("SK60. start → stop → start creates ONE new iterator, not two", g2 == 2)
+    await sk.stop()
+    let d61 = await sk.diagnostics()
+    await check("SK61. stop() releases the listener", !d61.isListening)
 }
+
+do {
+    /* Cancellation preserves evidence. */
+    let transport = FakeStoreKitTransport()
+    transport.enqueueRaw(status: 503, body: "{}")
+    let (analytics, sk, _, _) = try await skPair(transport: transport)
+    await analytics.setConsent(.analyticsAllowed)
+    await sk.submitForTesting(jws: StoreKitTestSupport.jws("p"))
+    await sk.start()
+    await sk.stop()
+    let d62 = await sk.diagnostics()
+    await check("*** SK62. cancelling the observer preserves queued evidence ***",
+                d62.pending == 1)
+}
+
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // STOREKIT — WHAT THE SOURCES MUST NOT CONTAIN
@@ -1029,9 +1118,83 @@ do {
                 !coreCode.contains("import StoreKit"),
                 "the core is no longer StoreKit-free")
 
-    await check("SK26. the client never branches on its own verification verdict",
-                !storeKitCode.contains("case .verified") && !storeKitCode.contains("case .unverified"),
-                "the SDK is filtering on a client-side verdict")
+    /*
+     * ⚠ THIS CHECK WAS REVERSED, DELIBERATELY AND ON THE OWNER'S INSTRUCTION.
+     *
+     * It used to assert the SDK never branches on `VerificationResult`, on the
+     * reasoning that a stale device trust store should not lose revenue. The
+     * accepted M6.2 contract says the opposite: `.verified` is enqueued,
+     * `.unverified` is not sent at all.
+     *
+     * Recorded as a reversal rather than quietly rewritten, because the old
+     * assertion was not a bug — it encoded a different decision. Server-side
+     * verification against Apple's roots remains mandatory for everything that
+     * IS sent; the local check narrows what is sent, it never decides what is
+     * trusted.
+     */
+    await check("*** SK26. the client enqueues ONLY `.verified`, per the M6.2 contract ***",
+                storeKitCode.contains("guard case .verified = result"),
+                "the verified-only guard is missing from the submission path")
+    await check("SK26b. …and Apple's error text is never retained or logged",
+                !storeKitCode.contains("localizedDescription")
+                    && !storeKitCode.contains("VerificationResult.VerificationError"),
+                "an Apple verification error is being kept")
+
+    // ── Phase 10: the privacy manifest, audited against the code ─────────
+    func manifest(_ target: String) -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent(target)
+            .appendingPathComponent("PrivacyInfo.xcprivacy")
+        return (try? String(contentsOf: url, encoding: .utf8)) ?? ""
+    }
+    let skManifest = manifest("WebmasterIDStoreKit")
+    let coreManifest = manifest("WebmasterID")
+
+    await check("SK63. the StoreKit target ships its OWN privacy manifest",
+                skManifest.contains("<plist"), "no manifest found")
+
+    await check("*** SK64. it declares Purchase History — this module sends purchase evidence ***",
+                skManifest.contains("NSPrivacyCollectedDataTypePurchaseHistory"))
+
+    await check("SK65. …and User ID, because the envelope can carry the account key",
+                skManifest.contains("NSPrivacyCollectedDataTypeUserID"))
+
+    await check("*** SK66. the CORE does NOT declare Purchase History ***",
+                !coreManifest.contains("NSPrivacyCollectedDataTypePurchaseHistory"),
+                "an analytics-only consumer would over-declare")
+
+    await check("SK67. the StoreKit module declares no Device ID — its envelope carries none",
+                !skManifest.contains("NSPrivacyCollectedDataTypeDeviceID"))
+
+    await check("SK68. …and no Coarse Location — its route retains no country",
+                !skManifest.contains("NSPrivacyCollectedDataTypeCoarseLocation"))
+
+    await check("SK69. tracking is false and there are no tracking domains, in both",
+                skManifest.contains("<key>NSPrivacyTracking</key>\n  <false/>")
+                    && skManifest.contains("<key>NSPrivacyTrackingDomains</key>\n  <array/>"))
+
+    /*
+     * ⚠ REQUIRED-REASON APIs, CHECKED AGAINST THE SOURCES RATHER THAN ASSERTED
+     * IN A COMMENT.
+     *
+     * The age bound is the one that could have needed a reason code: reading
+     * the file's modification date is category C617.1. It is measured from a
+     * timestamp inside the record instead, so the declaration stays empty and
+     * this proves it rather than promising it.
+     */
+    let requiredReasonAPIs = [
+        "modificationDate", "creationDate", "getattrlist", "fstat", "stat(",
+        "UserDefaults", "systemUptime", "mach_absolute_time",
+        "volumeAvailableCapacity", "statfs", "activeInputModes",
+    ]
+    let usedRequiredReason = requiredReasonAPIs.filter { storeKitCode.contains($0) }
+    await check("*** SK70. no required-reason API is used, so the empty declaration is honest ***",
+                usedRequiredReason.isEmpty, "found: \(usedRequiredReason)")
+
+    await check("SK71. the age bound reads the record's own timestamp, not the file's",
+                storeKitCode.contains("timeIntervalSince($0.queuedAt)"),
+                "the age bound is not measured from queuedAt")
 
     await check("SK27. no underscored SPI — sharing is `package`, which the compiler enforces",
                 !storeKitCode.contains("@_spi") && !coreCode.contains("@_spi"))

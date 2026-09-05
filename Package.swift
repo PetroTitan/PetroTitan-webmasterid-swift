@@ -71,6 +71,18 @@ let package = Package(
         .target(
             name: "WebmasterIDStoreKit",
             dependencies: ["WebmasterID"],
+            resources: [
+                /*
+                 * ⚠ ITS OWN MANIFEST, NOT THE CORE'S.
+                 *
+                 * Purchase History is collected by THIS module alone. Declaring
+                 * it in the core would make every analytics-only consumer claim
+                 * to collect purchase data. `.copy` for the same reason as the
+                 * core's: Apple requires the file at the ROOT of the resource
+                 * bundle, and `.process` may relocate it by type.
+                 */
+                .copy("PrivacyInfo.xcprivacy"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         /*
